@@ -95,6 +95,59 @@ class _RangeHttp:
 
 
 class GuideMediaTests(TestCase):
+    def test_wide_required_quality_uses_source_aspect_and_checks_both_edges(self):
+        for dimensions in (dict(width=2344,height=1080), dict(width=1080,height=2344)):
+            with self.subTest(dimensions=dimensions), TemporaryDirectory() as folder:
+                api = _Api()
+                http = Mock()
+                http.get.return_value = _Response()
+                with patch('pcrscript.extras.guide_media.video_info', return_value=dict(width=1280,height=590,duration=10)):
+                    path, _ = fetch_video(api,'BVsynthetic',dict(cid=1,duration=10,dimension=dimensions),
+                        Path(folder),http=http,minimum_quality=64)
+                self.assertTrue(path.exists())
+                with patch('pcrscript.extras.guide_media.video_info', side_effect=[
+                        dict(width=640,height=295,duration=10),dict(width=1280,height=590,duration=10)]):
+                    _, info = fetch_video(api,'BVsynthetic',dict(cid=1,duration=10,dimension=dimensions),
+                        Path(folder),http=http,minimum_quality=64)
+                self.assertFalse(info['cache_hit'])
+
+    def test_required_quality_replaces_low_resolution_cache_without_agent_refresh(self):
+        with TemporaryDirectory() as folder:
+            path = Path(folder)/'BVsynthetic'/'1.mp4'
+            path.parent.mkdir()
+            path.write_bytes(b'low-quality')
+            api = _Api()
+            http = Mock()
+            http.get.return_value = _Response()
+            with patch('pcrscript.extras.guide_media.video_info', side_effect=[
+                    dict(width=640, height=360, duration=10), dict(width=1280, height=720, duration=10)]):
+                _, info = fetch_video(api, 'BVsynthetic', dict(cid=1, duration=10), Path(folder),
+                                      http=http, minimum_quality=64)
+            self.assertEqual(api.qualities, [64])
+            self.assertEqual(path.read_bytes(), b'test')
+            self.assertFalse(info['cache_hit'])
+
+    def test_required_quality_never_downloads_server_downgrade(self):
+        api = _Api()
+        api.getVideoPlay = Mock(return_value=dict(code=0, data=dict(quality=16, durl=[dict(url='https://cdn.invalid/16')])))
+        http = Mock()
+        with TemporaryDirectory() as folder, self.assertRaisesRegex(RuntimeError, '清晰度'):
+            fetch_video(api, 'BVsynthetic', dict(cid=1), Path(folder), http=http, minimum_quality=64)
+        http.get.assert_not_called()
+
+    def test_required_quality_gets_total_bounded_download_time(self):
+        deadlines = []
+        def transfer(url, headers, temporary, timeout, max_bytes, deadline, idle_limit, check):
+            deadlines.append(deadline)
+            temporary.write_bytes(b'test')
+            return 4
+        with TemporaryDirectory() as folder, \
+                patch('pcrscript.extras.guide_media.time.monotonic', return_value=0), \
+                patch('pcrscript.extras.guide_media.bounded_transfer', side_effect=transfer), \
+                patch('pcrscript.extras.guide_media.video_info', return_value=dict(width=1280, height=720, duration=10)):
+            fetch_video(_Api(), 'BVsynthetic', dict(cid=1, duration=10), Path(folder), minimum_quality=64, max_seconds=180)
+        self.assertEqual(deadlines, [180])
+
     def test_small_stream_can_be_requested_without_restarting_large_streams(self):
         with TemporaryDirectory() as folder, patch('pcrscript.extras.guide_media.video_info',
                 return_value=dict(width=640,height=360,duration=10)):

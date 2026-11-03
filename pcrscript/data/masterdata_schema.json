@@ -382,6 +382,44 @@
         }
       }
     },
+    "seven_event_setting": {
+      "table": "v1_4bced1b9f4b2e4b63614ea9d083dc639e9d3544b6f1434ea076194b118cfe420",
+      "columns": {
+        "event_id": {
+          "hash": "225093acae62d07ce2d0091f736940de4f377958a98dc52f2a5fcd930c433002",
+          "type": "INTEGER"
+        },
+        "title": {
+          "hash": "fa0142d55cc0718ae83f2beebf86eda16baee9ed38b1fca0418574b8ba420b33",
+          "type": "TEXT"
+        }
+      }
+    },
+    "seven_schedule": {
+      "table": "v1_acf78d4d17c9cbc373f2cff726f7cad0c3bd370f7b7cf02e55ac09384409c687",
+      "columns": {
+        "schedule_id": {
+          "hash": "5d293fbcb76288b862127329e702c66435daf71dd6e13d4b7346577cca733b4e",
+          "type": "INTEGER"
+        },
+        "event_id": {
+          "hash": "e07cbd5d2ffd6fd59454553fb445b4308b4048a695630686e7eb4eecbb76985a",
+          "type": "INTEGER"
+        },
+        "event_type": {
+          "hash": "ae3613fc0cc9a49f23cc8690aaed005a248f509712be06878e86db1e956c7c43",
+          "type": "INTEGER"
+        },
+        "start_time": {
+          "hash": "12c603faf52e8c93d9ee9af229901b28815a80ffc00cbd50a0152344b535b187",
+          "type": "TEXT"
+        },
+        "end_time": {
+          "hash": "3a402a2303d3ad617457cc03e74198fe6572331f1bbdb7f20624e354c0daf042",
+          "type": "TEXT"
+        }
+      }
+    },
     "skill_data": {
       "table": "v1_34f8b61469da2780301bcc1107f3f2f1ea341b55e898cc5b195e75e2c104d37f",
       "columns": {
@@ -495,6 +533,48 @@
         },
         "icon_type": {
           "hash": "6ccb0de64c44121a2a7c4d7a59020418d9f535af9c0044186180207efd149199",
+          "type": "INTEGER"
+        }
+      }
+    },
+    "tower_area_data": {
+      "table": "v1_8587a5e883f0d0d422a5b404e28bf6d60f9c86b23f3bee3de7333d33b489bc11",
+      "columns": {
+        "tower_area_id": {
+          "hash": "d0e0eec22dbbfd13246c1a87043ff1984d937102aa40bc6792160e63a1c01bf7",
+          "type": "INTEGER"
+        },
+        "max_floor_num": {
+          "hash": "f4a02b6d16a81a1b027f70ce84c49ddffa9b1154a8b0b264636e6fa79501852e",
+          "type": "INTEGER"
+        },
+        "cloister_quest_id": {
+          "hash": "c584af0c1995dfb963a81de675f6ffe4f0c57dcacf5a1ee87c1c1867c90764bd",
+          "type": "INTEGER"
+        }
+      }
+    },
+    "tower_quest_data": {
+      "table": "v1_de0f55cda6d35c4fe9042019fde2d69aeccfa1ab73a52d5898a7908faa32193b",
+      "columns": {
+        "tower_quest_id": {
+          "hash": "7c1ec7ea86df6e34bb2a4121fb0b43eadea164d452a4cece4d4ca215647909ef",
+          "type": "INTEGER"
+        },
+        "tower_area_id": {
+          "hash": "0eba4e4b7e106e1352821ede2c1dc67f8978e1c42656397953b67651079224d7",
+          "type": "INTEGER"
+        },
+        "floor_num": {
+          "hash": "4b305419b042514a66643554eb0c1edf9e064d2164b9a60a8e788d2775706a96",
+          "type": "INTEGER"
+        },
+        "stamina": {
+          "hash": "0ef2691adbcffb858d224eb99370d6894f948a0505f9980f25174e37230b8732",
+          "type": "INTEGER"
+        },
+        "stamina_start": {
+          "hash": "fe04692f433645b1ebb1230a87fec2f3d6f867315e4ec9755374585cf3ade116",
           "type": "INTEGER"
         }
       }

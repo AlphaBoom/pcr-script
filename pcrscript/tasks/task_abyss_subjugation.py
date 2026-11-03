@@ -1,6 +1,7 @@
 """Daily outpost clears/sweeps and ticket-funded Abyss Subjugation bosses."""
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -13,7 +14,8 @@ from .abyss_retry import combat_sample, retry_decision
 from .registry import register
 from .subjugation_party import (SubjugationFormation, prepare_avatars, recover_equipment,
                                 require_event_talent, guide_party, trial_stage)
-from .party_preparation import source_candidates, prepare_special, party_fingerprint, numeric_equipment_unknown
+from .party_preparation import (source_candidates, prepare_special, party_fingerprint,
+    numeric_equipment_unknown, cultivate_on_demand)
 from ..constants import SERVER_TIMEZONE
 from ..game_ui import abyss_subjugation as field
 from ..game_ui.dawn_labyrinth import navigation_exit as maze_navigation_exit
@@ -54,7 +56,7 @@ def validate_options(options):
         flags=(('preview_only', False), ('first_clear', True), ('allow_local_trials', True),
                ('auto_collect_house_stamina', True), ('discover_sources', True),
                ('auto_equip_special', True), ('allow_five_star_upgrade', False),
-               ('allow_divine_amulets', False)))
+               ('allow_divine_amulets', False), ('on_demand_cultivation', True)))
     if 'avatars' in value and not isinstance(value['avatars'], dict):
         raise ValueError('AbyssSubjugation.avatars必须是配置对象')
     if 'sources' in value and not isinstance(value['sources'], dict):
@@ -110,6 +112,7 @@ class AbyssSubjugation(TimeLimitTask):
         self.guide_streams = {}
         self.inspected_sources = {}
         self.boss_unlocks = {}
+        self.cultivated = set()
         self.failed_boss_teams = {}
         self._battle_samples = []
         self._next_sample = 0
@@ -439,10 +442,10 @@ class AbyssSubjugation(TimeLimitTask):
         button = s.find('战斗开始', (780, 410, 935, 505), exact=True)
         if not field.formation(s) or not s.blue_button(button):
             raise SubjugationBlocked('战斗开始按钮未确认')
-        require_event_talent(self, party)
-        # Old cached trials allowed every member to die. Restore the shared
-        # combat default before either a free simulation or a real attack.
-        party.allow_deaths = 0
+        require_event_talent(self, party,allow_mixed=bool(plan and plan.get('kind')=='outpost_battle'))
+        # A boss attack is judged by its settled damage, so casualties play out
+        # in both the free simulation and the paid repeat. Outposts need a win.
+        party.allow_deaths = 4 if plan is None or plan.get('kind') == 'boss_battle' else 0
         self.last_result = dict(preparation=prepared)
         self._battle_samples = []
         self._next_sample = 0
@@ -483,6 +486,20 @@ class AbyssSubjugation(TimeLimitTask):
                 allow_substitutions=self.options['allow_local_trials'])
         return self.guide_streams[key]
 
+    def collect_house_once(self):
+        """Visit the Guild House once per run when stamina limits work; True when stamina arrived."""
+        if not self.options['auto_collect_house_stamina'] or self.house_checked:
+            return False
+        from ..game_ui.guild_house import collect_produced_stamina
+        self.house_checked = True
+        try:
+            self.report['house_stamina'] = collect_produced_stamina(self.ui, self.enter())
+        except EventUIError as error:
+            # A receipt without stamina or an unread one must not cost the affordable sweeps.
+            self.report['house_stamina'] = dict(error=str(error))
+            return False
+        return not self.report['house_stamina'].get('empty')
+
     def ensure_stamina(self, difficulty, detail):
         # Cleared stages already select their remaining attempts. Derive the
         # unit cost from that preview instead of reducing and restoring it.
@@ -505,11 +522,7 @@ class AbyssSubjugation(TimeLimitTask):
         # require a fresh complete nonnegative preview before any challenge.
         if preview is None and self.ui.number(detail, (165, 446, 211, 476)) is None:
             raise SubjugationBlocked('前哨现有体力未知')
-        if self.options['auto_collect_house_stamina'] and not self.house_checked:
-            from ..game_ui.guild_house import collect_produced_stamina
-            self.house_checked = True
-            s = self.enter()
-            self.report['house_stamina'] = collect_produced_stamina(self.ui, s)
+        if self.collect_house_once():
             detail = self.normal_detail(difficulty)
             detail = self.adjust_quantity(detail, 1)
             preview = field.stamina_preview(self.ui, detail)
@@ -519,6 +532,11 @@ class AbyssSubjugation(TimeLimitTask):
 
     def select_verified_party(self, party, reopen):
         prepare_avatars(self)
+        if party.build_basis == 'portrait_trial':
+            order = self.formation.select_by_portrait([m.name for m in party.members])
+            if order is None:
+                raise SubjugationBlocked('模拟队伍头像复核失败，未实战')
+            return party, order
         ready, selection = self.formation.select(party)
         if ready:
             return party, selection['order']
@@ -548,7 +566,7 @@ class AbyssSubjugation(TimeLimitTask):
             try:
                 reopen()
                 party, order = guide_party(self, seed, reopen,
-                                          allow_substitutions=candidate.allow_substitutions)
+                                          allow_substitutions=candidate.allow_substitutions,outpost=True)
                 if party_fingerprint(party) in failed:
                     continue
             except EventUIError as error:
@@ -559,6 +577,31 @@ class AbyssSubjugation(TimeLimitTask):
             return party, order
         raise SubjugationBlocked('没有核验通过的本期前哨攻略；未开战')
 
+    def cultivate(self, party, declared=None):
+        """Stars and a missing unique follow a poor test, once per character each run."""
+        members = [m for m in party.members if normalized(m.name) not in self.cultivated]
+        if declared is not None:
+            # A prepared party pins the account's current build; only the guide's
+            # own stars and unique limit what cultivation may raise.
+            source = {normalized(m.name): m for m in declared}
+            members = [replace(m, stars=getattr(source.get(normalized(m.name)), 'stars', None),
+                               unique=getattr(source.get(normalized(m.name)), 'unique', None))
+                       for m in members]
+        if not self.options['on_demand_cultivation'] or self.options['preview_only'] or not members:
+            return False
+        self.cultivated.update(normalized(m.name) for m in members)
+        self.report_progress('实测未达标 · 按需升星与补专武')
+        from .task_home import ToHomePage
+        def home():
+            ToHomePage(self.robot).run(timeout=60)
+        self.enter()
+        home()
+        changed = cultivate_on_demand(self.ui, members, report=self.report, save=self.save, home=home,
+                                      allow_amulets=self.options['allow_divine_amulets'])
+        for name in changed:
+            self.formation.observed.pop(normalized(name), None)
+        return bool(changed)
+
     def source_parties(self, kind, boss='', boss_number=None, *, difficulty, advance=False):
         if not self.options['discover_sources'] and not self.options['source_urls']:
             return []
@@ -566,9 +609,19 @@ class AbyssSubjugation(TimeLimitTask):
         if key not in self.source_pools or advance:
             from .subjugation_guides import source_options, parties_for_target
             from .strategy_video import acquire_strategies
-            prepare_avatars(self)
             options = source_options(self.options, self.event, kind=kind, boss=boss, boss_number=boss_number,
                                      difficulty=difficulty)
+            prepare_avatars(self)
+            # Parsed parties keep their true scope, so another outpost tier can
+            # filter the same report instead of walking the sources again.
+            shared = getattr(self, 'outpost_sources', None) if kind == 'outpost' and not advance else None
+            if shared:
+                pool = parties_for_target(shared['report'], options,
+                                          allow_local_trials=self.options['allow_local_trials'])
+                if pool:
+                    self.inspected_sources.setdefault(key, set()).update(shared['inspected'])
+                    self.source_pools[key] = pool
+                    return pool
             if self.options['allow_local_trials'] and kind == 'boss':
                 targets = [target for (target_kind, _, target_boss), target
                            in getattr(self, 'source_targets', {}).items()
@@ -576,7 +629,18 @@ class AbyssSubjugation(TimeLimitTask):
                 if targets:
                     options['observed_target'] = targets
             self.report_progress('检索并解析本期攻略 · '+difficulty+('前哨' if kind == 'outpost' else boss))
-            report = acquire_strategies(options, index=self.formation.avatars, check=self.check_deadline,
+            source_started = time.monotonic()
+            progress_at = source_started
+            def check_source():
+                nonlocal progress_at
+                self.check_deadline()
+                now = time.monotonic()
+                if now-progress_at >= 5:
+                    progress_at = now
+                    self.report_progress('攻略下载／解析 · '+difficulty+
+                        ('前哨' if kind == 'outpost' else boss)+
+                        f" · {int(now-source_started)}/{options['parse_timeout']}秒")
+            report = acquire_strategies(options, index=self.formation.avatars, check=check_source,
                 exclude_sources=self.inspected_sources.get(key, set()),
                 accept=lambda report: bool(parties_for_target(report, options,
                     allow_local_trials=self.options['allow_local_trials'])))
@@ -584,6 +648,8 @@ class AbyssSubjugation(TimeLimitTask):
             self.report.setdefault('sources', []).append(dict(kind=kind, difficulty=difficulty, boss=boss, report=report))
             self.source_pools[key] = parties_for_target(report, options,
                                                 allow_local_trials=self.options['allow_local_trials'])
+            if kind == 'outpost' and self.source_pools[key]:
+                self.outpost_sources = dict(report=report, inspected=set(self.inspected_sources[key]))
             self.save()
         return self.source_pools[key]
 
@@ -619,7 +685,8 @@ class AbyssSubjugation(TimeLimitTask):
             # Reconciliation must have confirmed unchanged attempts and tickets.
             if self.state.get('pending'):
                 raise SubjugationBlocked('前哨失败资源尚未核对；未追加试打')
-            failed.add(party_fingerprint(party))
+            if not self.cultivate(party):
+                failed.add(party_fingerprint(party))
             failures['difficulties'][difficulty] = sorted(failed)
             self.report.setdefault('normal_trials', []).append(dict(difficulty=difficulty,
                 party=party.name, outcome='failed', resources_unchanged=True))
@@ -694,6 +761,9 @@ class AbyssSubjugation(TimeLimitTask):
             # A partial selection or insufficient budget retains the existing
             # per-tier first-clear and quantity-adjustment path.
             self.enter()
+            if (preview['stamina_owned'] < min(budget, sum(counts.values())*25)
+                    and self.collect_house_once()):
+                return self.outposts()
         for difficulty in field.DIFFICULTIES:
             self.report_progress('前哨'+difficulty+' · 首通后消耗剩余次数')
             before = self.enter()
@@ -715,6 +785,8 @@ class AbyssSubjugation(TimeLimitTask):
             preview = field.stamina_preview(self.ui, detail)
             quantity = min(counts[difficulty], (self.options['max_stamina']-self.report['stamina_spent'])//unit_cost,
                            preview[0]//unit_cost)
+            if preview[0]//unit_cost < counts[difficulty] and quantity == preview[0]//unit_cost and self.collect_house_once():
+                return self.outposts()
             if quantity <= 0:
                 raise SubjugationBlocked('前哨现有体力或本次体力上限不足')
             detail = self.adjust_quantity(detail, quantity)
@@ -740,31 +812,25 @@ class AbyssSubjugation(TimeLimitTask):
         verdict = dict(accepted=False, attack_budget=budget)
         if not budget['remaining']:
             return dict(verdict, reason='该首领首通刀数上限已用完')
-        retry = self.last_result['retry']
         if result.outcome != 'settled':
             return dict(verdict, reason=result.reason or '模拟战未正常结算')
-        if retry['action'] in ('change_survival', 'retry_once'):
-            return dict(verdict, reason='模拟战出现持续减员，需重试或换队')
-        if self.last_result.get('win'):
-            return dict(verdict, accepted=True, estimated_attacks=1, reason='免费模拟已击杀')
-        samples = self.last_result['samples']
-        timed_alive = (len(samples) >= 3 and min(s['seconds'] for s in samples) <= 8
-                       and all(s.get('living_portraits') == 5 for s in samples[-3:]))
         remaining, maximum = reference['health']
-        expected = (remaining+budget['remaining']-1)//budget['remaining']
         damage = self.last_result.get('damage')
+        # Settled damage stops at the remaining HP, so reaching it is a kill.
+        if self.last_result.get('win') or (type(damage) is int and remaining <= damage <= maximum):
+            return dict(verdict, accepted=True, estimated_attacks=1, reason='免费模拟已击杀')
+        expected = (remaining+budget['remaining']-1)//budget['remaining']
         valid_damage = type(damage) is int and 0 < damage <= maximum
         estimated = (remaining+damage-1)//damage if valid_damage else None
-        # A source establishes the strategy, not this account's damage. Even
-        # adapted teams may finish in several paid attacks after a full,
-        # surviving free trial. One attack against full HP needs an actual
-        # win; a partial boss can be finished with proven nonlethal damage.
+        # A source establishes the strategy, not this account's damage. Settled
+        # damage decides, casualties or not: it counts the same on the real boss.
+        # One attack against full HP needs an actual win; a partial boss can be
+        # finished with proven nonlethal damage.
         met = valid_damage and meets_reference(damage, expected, maximum, False)
-        return dict(verdict, accepted=timed_alive and met, expected_damage=expected,
+        return dict(verdict, accepted=met, expected_damage=expected,
                     simulated_damage=damage, estimated_attacks=estimated,
                     source_reference=party.damage_reference,
-                    reason=('存活至时限，预计'+str(estimated)+'刀完成，符合剩余刀数预算' if timed_alive and met else
-                            '未确认队伍存活至时限' if not timed_alive else
+                    reason=('预计'+str(estimated)+'刀完成，符合剩余刀数预算' if met else
                             '模拟伤害未知或超出首领生命上限' if not valid_damage else
                             '模拟伤害不足以在剩余刀数内首通'))
 
@@ -796,13 +862,15 @@ class AbyssSubjugation(TimeLimitTask):
         failed = self.failed_boss_teams.setdefault((index, difficulty), set())
         attempts = {}
         retry_party = None
+        cultivated_candidate = None
         while True:
             retrying = retry_party is not None
             if retrying:
                 party, retry_party = retry_party, None
                 candidate_name = party.name
             else:
-                candidate = next(candidates, None)
+                candidate = cultivated_candidate or next(candidates, None)
+                cultivated_candidate = None
                 if candidate is None:
                     break
                 candidate_name = candidate.party.name
@@ -842,6 +910,10 @@ class AbyssSubjugation(TimeLimitTask):
             if record['readiness']['accepted']:
                 self.simulated_loadout = self.last_result['preparation']
                 return party, order
+            if not retrying and self.cultivate(party, candidate.party.members):
+                # The improved build deserves its own test before another guide.
+                cultivated_candidate = candidate
+                continue
             failed.add(signature)
             retry = self.last_result['retry']
             if retry['action'] == 'retry_once' and attempts[signature] < 2:
@@ -978,12 +1050,11 @@ class AbyssSubjugation(TimeLimitTask):
             # Like dungeon attempts, use reconciled before/after HP for real
             # damage; a result OCR miss must not discard verified progress.
             actual_damage = plan['health'][0]-self.report['bosses'][key]['health'][0] if not defeated else plan['health'][0]
-            if (not defeated and (self.last_result['retry']['action'] in ('change_survival', 'retry_once')
-                    or not meets_reference(actual_damage, expected, plan['health'][0], False))):
+            if not defeated and not meets_reference(actual_damage, expected, plan['health'][0], False):
                 self.failed_boss_teams.setdefault((index, difficulty), set()).add(party_fingerprint(party))
                 self.report.setdefault('real_rejections', []).append(dict(index=index, difficulty=difficulty,
                     expected_damage=expected, actual_damage=actual_damage, attack_budget=budget,
-                    result=dict(self.last_result), reason='实战减员或伤害不足以在剩余刀数内首通，先换队重新模拟'))
+                    result=dict(self.last_result), reason='实战伤害不足以在剩余刀数内首通，先换队重新模拟'))
                 self.save()
                 party = None
 

@@ -148,6 +148,23 @@ def battle_rectangles(image, *, relaxed=False) -> list[tuple[int, int, int, int]
     boxes = [r for r in boxes if .07*width <= r[2] <= .12*width
              and .78 <= r[2]/r[3] <= 1.12
              and r[1]+r[3] < height*(.96 if relaxed else .94)]
+    # When several SET bubbles merge with the card outlines, their outer
+    # rectangles are too wide to fit the row. Recover square card bodies
+    # from real bottom stripes, requiring independent left and bottom edges
+    # so five horizontal TP bars cannot become portrait proposals.
+    horizontal = cv.morphologyEx(mask, cv.MORPH_OPEN,
+        np.ones((1, max(12, round(width*.04))), np.uint8))
+    stripes, _ = cv.findContours(horizontal, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE)
+    for contour in stripes:
+        x, y, w, h = cv.boundingRect(contour)
+        top, bottom = y+h-w, y+h
+        if (not .07*width <= w <= .12*width or h > height*.03
+                or top < height*.65 or bottom >= height*(.96 if relaxed else .94)):
+            continue
+        edge = max(2, w//14)
+        if (np.mean(mask[top:bottom,x:x+edge] > 0) >= .25
+                and np.mean(mask[bottom-edge:bottom,x:x+w] > 0) >= .35):
+            boxes.append((x,top,w,w))
     # The inner border remains separate when a SET bubble joins the outer one.
     anchors = []
     for r in sorted(boxes, key=lambda r: r[2]*r[3]):

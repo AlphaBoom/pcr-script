@@ -12,22 +12,37 @@ from .strategy_video import acquire_strategies, task_source_options
 
 
 def boss_parties(options: dict, *, kind: str, area: str, difficulty: str,
-                 mode: int, default_path: str, check=lambda: None) -> tuple[list[EventParty], dict | None]:
+                 mode: int, default_path: str, check=lambda: None, exclude_sources=()) -> tuple[list[EventParty], dict | None]:
     """Search by default; a legacy local plan is an explicit fallback only."""
     for key, default in (('discover_sources', True), ('use_local_teams', False),
                          ('allow_local_trials', True), ('allow_party_variants', True),
-                         ('require_source_settings', False)):
+                         ('require_source_settings', False), ('allow_phase_continuation_trials', False),
+                         ('allow_limited_phase_continuation_trials', False)):
         if type(options.get(key, default)) is not bool:
             raise ValueError(f'{key}必须为布尔值')
     report = None
     found = []
+    configured_exclusions = options.get('sources', {}).get('exclude_sources', [])
+    if (not isinstance(configured_exclusions, (list, tuple))
+            or any(not isinstance(url, str) or not url.strip() for url in configured_exclusions)):
+        raise ValueError('sources.exclude_sources必须为非空来源URL字符串列表')
+    exclude_sources = frozenset(exclude_sources) | frozenset(configured_exclusions)
     if options.get('discover_sources', True):
+        def usable(report):
+            return bool(event_parties(report, area, difficulty, mode) or (
+                options.get('allow_local_trials', True) and event_trial_parties(report, area, difficulty, mode,
+                    require_settings=options.get('require_source_settings', False),
+                    allow_phase_continuation=options.get('allow_phase_continuation_trials', False),
+                    allow_limited_phase_continuation=options.get('allow_limited_phase_continuation_trials', False))))
         report = acquire_strategies(task_source_options(kind, options, area=area,
-                                    difficulty=difficulty, mode=mode), check=check)
+                                    difficulty=difficulty, mode=mode), check=check,
+                                    exclude_sources=exclude_sources, accept=usable)
         found = event_parties(report, area, difficulty, mode)
         if options.get('allow_local_trials', True):
             seeds = event_trial_parties(report, area, difficulty, mode,
-                                       require_settings=options.get('require_source_settings', False))
+                                       require_settings=options.get('require_source_settings', False),
+                                       allow_phase_continuation=options.get('allow_phase_continuation_trials', False),
+                                       allow_limited_phase_continuation=options.get('allow_limited_phase_continuation_trials', False))
             found.extend(seeds)
             if seeds and options.get('allow_party_variants', True):
                 avatar_options = options.get('sources', {}).get('avatars') or {}

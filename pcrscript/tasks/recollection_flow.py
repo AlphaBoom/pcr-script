@@ -127,6 +127,7 @@ class RecollectionTask(BaseTask):
         self.click(screen, '确认', (350, 440, 615, 525))
 
     def enter(self):
+        from ..game_ui.navigation import exploration_list_exit
         missing_entry = 0
         for _ in range(30):
             s = self.capture()
@@ -143,7 +144,7 @@ class RecollectionTask(BaseTask):
                 self.click(s, '确认|关闭|确定', (250, 430, 720, 525))
             elif field.bulk_confirmation(s) or field.bulk_catalogue(s) or field.difficulty_selector(s):
                 self.click(s, '取消|关闭', (250, 440, 615, 525))
-            elif (cancel := subjugation_navigation_exit(s)) is not None:
+            elif (cancel := exploration_list_exit(s) or subjugation_navigation_exit(s)) is not None:
                 self.ui.click(cancel)
             elif (cancel := maze_navigation_exit(s)) is not None:
                 self.ui.click(cancel)

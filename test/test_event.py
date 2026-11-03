@@ -994,6 +994,131 @@ class WorkflowTests(TestCase):
         self.assertFalse(r.entry_dialog(frame(("购买体力", 480, 148), ("关闭", 480, 372))))
         self.assertEqual(r.ui.clicks, [])
 
+    def test_story_boss_unlock_receipt_is_closed_without_challenging(self):
+        r = CampaignClean.__new__(CampaignClean)
+        r.ui = Mock()
+        receipt = frame(('解锁首领战', 480, 148), ('首领战（剧本模式）', 500, 260),
+                        ('已解锁。', 455, 280), ('关闭', 480, 372))
+        self.assertTrue(r.entry_dialog(receipt))
+        r.ui.expect_click.assert_called_once_with('关闭', (350, 340, 615, 410), exact=True)
+        r.ui.click.assert_not_called()
+        r.ui.reset_mock()
+        self.assertFalse(r.entry_dialog(frame(('解锁首领战', 480, 148), ('是否解锁？', 480, 280))))
+        r.ui.expect_click.assert_not_called()
+
+    def test_branched_story_list_can_return_home_but_not_through_unlock_modal(self):
+        from pcrscript.game_ui.event_layout import navigation_exit
+        listing = frame(('活动剧情', 110, 30), ('第6话', 60, 135), ('新内容', 170, 85))
+        self.assertEqual(navigation_exit(listing), (32, 30))
+        listing.items.extend(frame(('解锁首领战', 480, 148), ('关闭', 480, 372)).items)
+        self.assertIsNone(navigation_exit(listing))
+
+    def test_quest_tab_is_reselected_when_entry_tutorial_switches_to_bosses(self):
+        r = CampaignClean.__new__(CampaignClean)
+        boss = frame(('活动关卡·首领', 150, 30), ('活动关卡', 575, 76),
+                     ('首领战', 825, 76), ('剧本模式', 825, 233))
+        levels = frame(('活动关卡·首领', 150, 30), ('活动关卡N-1', 700, 220))
+        r.entry_dialog = Mock(return_value=False)
+        r.ui = Mock(capture=Mock(return_value=boss))
+        def wait(predicate, description):
+            self.assertFalse(predicate(boss))
+            self.assertTrue(predicate(levels))
+            return levels
+        r.ui.wait.side_effect = wait
+        self.assertIs(r.quests(), levels)
+        self.assertEqual(r.ui.click.call_args.args[0].text, '活动关卡')
+
+    def test_home_reobserves_detail_transition_before_reward_summary(self):
+        r = CampaignClean.__new__(CampaignClean)
+        r.check_deadline = Mock()
+        r.ui = ReplayUI([frame(('活动关卡H-3', 130, 40)),
+                         frame(('自动推进报酬一览', 480, 40), ('关闭', 480, 480)),
+                         fixture('event_home')])
+        r.ui.expect_click = lambda pattern, *a, **kw: r.ui.clicks.append(pattern)
+        with patch('pcrscript.tasks.task_story_event.time.sleep'):
+            self.assertTrue(r.home().event_home)
+        self.assertEqual(r.ui.clicks, ['关闭'])
+
+    def test_hard_sweep_collects_only_produced_stamina_then_rereads_plan(self):
+        r = CampaignClean.__new__(CampaignClean)
+        reason = '体力不足以完成困难批量扫荡，继续领奖；未购买体力'
+        r.report = dict(pending=[reason])
+        r.options = {}
+        r.robot = Mock()
+        r.ui = Mock()
+        r.home = Mock()
+        r.enter = Mock()
+        with patch.object(HardSweep, 'run', side_effect=[False, True]) as sweep, \
+                patch('pcrscript.game_ui.guild_house.collect_produced_stamina', return_value=dict(before=90, after=300)) as house, \
+                patch('pcrscript.tasks.task_home.ToHomePage.run'):
+            self.assertTrue(r.sweep())
+        self.assertEqual(sweep.call_count, 2)
+        house.assert_called_once_with(r.ui, r.home.return_value)
+        self.assertEqual(r.report['pending'], [])
+        self.assertEqual(r.report['house_stamina'], [dict(before=90, after=300)])
+
+    def test_house_collection_switch_rejects_non_boolean_before_ui(self):
+        with patch('pcrscript.tasks.task_story_event.EventUI') as ui:
+            with self.assertRaisesRegex(ValueError, 'collect_house_stamina'):
+                CampaignClean(SimpleNamespace(driver=Mock()), dict(collect_house_stamina='false'))
+        ui.assert_not_called()
+
+    def test_source_deadline_callback_observes_cooperative_stop(self):
+        from pcrscript.run_session import RunCancelled
+        r = CampaignClean.__new__(CampaignClean)
+        r.deadline = float('inf')
+        with patch('pcrscript.tasks.task_story_event.checkpoint', side_effect=RunCancelled):
+            with self.assertRaises(RunCancelled):
+                r.check_deadline()
+
+    def test_two_line_event_title_with_latin_letter_is_checked_against_help(self):
+        r = CampaignClean.__new__(CampaignClean)
+        home = frame(('炼狱的名侦探', 480, 310), ('全部成为', 480, 370),
+                     ('举办时间:10/30 11:00～11/22 04:59', 480, 445), ('帮助', 920, 50))
+        help_page = frame(('帮助', 480, 40), ('炼狱的名侦探全部成为W', 480, 175),('关闭',480,480))
+        r.home = Mock(return_value=home)
+        r.options = {}
+        r.ui = Mock(capture=Mock(return_value=help_page), wait=Mock(return_value=help_page))
+        r.report = {}
+        with patch('pcrscript.tasks.task_story_event.time.sleep'), \
+                patch('pcrscript.news.fetch_event_news', return_value=SimpleNamespace(
+                    hatsune=SimpleNamespace(name='剧情活动：炼狱的名侦探　全部成为W'))):
+            self.assertEqual(r.event_identity(), '炼狱的名侦探全部成为W')
+        self.assertEqual(r.report['event_identity']['basis'], 'live_help_and_home')
+        self.assertEqual(r.options['sources']['aliases'], ['炼狱的名侦探', '全部成为W'])
+
+    def test_event_identity_accepts_help_already_closed(self):
+        r = CampaignClean.__new__(CampaignClean)
+        home = frame(('合成主标题',480,310),('合成副标题',480,370),
+                     ('举办时间:10/30',480,445),('帮助',920,50),
+                     ('活动剧情',800,420),('报酬兑换',260,420))
+        help_page = frame(('帮助',480,40),('合成主标题合成副标题',480,175))
+        r.home=Mock(return_value=home);r.options={};r.report={}
+        r.ui=Mock(capture=Mock(return_value=help_page),wait=Mock(side_effect=[help_page,home]))
+        with patch('pcrscript.tasks.task_story_event.time.sleep'), \
+                patch('pcrscript.news.fetch_event_news',return_value=SimpleNamespace(hatsune=None)):
+            self.assertEqual(r.event_identity(),'合成主标题合成副标题')
+        r.ui.click.assert_called_once_with(home.find('帮助',(850,0,960,85),exact=True))
+
+    def test_title_line_order_needs_matching_plain_help_in_both_frames(self):
+        r=CampaignClean.__new__(CampaignClean)
+        reversed_title=frame(('合成副标题W',480,310),('合成主标题',480,370),
+            ('举办时间:10/30',480,445),('帮助',920,50))
+        normal=frame(('合成主标题',480,310),('合成副标题W',480,370),
+            ('举办时间:10/30',480,445),('帮助',920,50))
+        help_page=frame(('帮助',480,40),('合成主标题合成副标题W',480,175),('关闭',480,480))
+        for heading,valid in ((help_page,True),(frame(('帮助',480,40),('另一个完全不同的活动',480,175)),False)):
+            r.home=Mock(side_effect=[reversed_title,normal]);r.options={};r.report={}
+            r.ui=Mock(capture=Mock(return_value=heading),wait=Mock(return_value=heading))
+            with patch('pcrscript.tasks.task_story_event.time.sleep'), \
+                 patch('pcrscript.news.fetch_event_news',return_value=SimpleNamespace(hatsune=None)):
+                if valid:
+                    self.assertEqual(r.event_identity(),'合成主标题合成副标题W')
+                    self.assertEqual(r.report['event_identity']['home_title'],'合成主标题合成副标题W')
+                else:
+                    with self.assertRaisesRegex(EventUIError,'帮助标题与首页不一致'):
+                        r.event_identity()
+
     def test_login_receipt_missing_close_stops_without_blind_clicks(self):
         r = CampaignClean.__new__(CampaignClean)
         r.ui = ReplayUI([])
@@ -1024,6 +1149,19 @@ class WorkflowTests(TestCase):
             result = combat.retreat('测试动画遮挡')
         self.assertEqual(result.outcome, 'retreated')
         self.assertEqual(ui.clicks, ['btn_menu_text', 'btn_giveup'])
+
+    def test_retreat_simulation_confirmation_precedes_parent_menu_template(self):
+        modal=frame(('放弃模拟战',480,160),('放弃',575,359),('放弃',625,434))
+        modal.blue_button=Mock(return_value=True)
+        ui=ReplayUI([modal,fixture('boss_plus')])
+        ui.click=Mock(wraps=ui.click)
+        combat=EventCombat.__new__(EventCombat);combat.ui=ui
+        combat.r=SimpleNamespace(log=Mock(),story_dialog=Mock(return_value=False))
+        combat.match=Mock(return_value=None)
+        result=combat.retreat('模拟失败')
+        self.assertEqual(result.outcome,'retreated')
+        self.assertEqual(len(ui.clicks),1)
+        self.assertEqual(ui.click.call_args.args[0].center,(575,359))
 
     def test_pause_does_not_toggle_menu_while_panel_ocr_settles(self):
         combat = EventCombat.__new__(EventCombat)
@@ -1102,7 +1240,8 @@ class WorkflowTests(TestCase):
         r.ui = ReplayUI([fixture("boss_plus"), fixture("event_home")])
         r.ui.expect_click = Mock()
         self.assertTrue(r.home().event_home)
-        r.ui.expect_click.assert_called_once_with("取消", (550, 420, 950, 520), exact=True)
+        self.assertEqual(r.ui.clicks, ['取消'])
+        r.ui.expect_click.assert_not_called()
 
     def test_old_event_layout_is_skipped_without_new_layout_clicks(self):
         r = CampaignClean.__new__(CampaignClean)
@@ -1148,6 +1287,22 @@ class WorkflowTests(TestCase):
         battles.bosses()
         battles.ui.click.assert_not_called()
         battles.ui.expect_click.assert_not_called()
+
+    def test_complete_event_reads_unlocking_stories_before_bosses(self):
+        r = CampaignClean.__new__(CampaignClean)
+        r.options = dict(first_clear=True, bosses=True)
+        r.report = dict(status='running', pending=[])
+        r.enter = Mock(return_value=True)
+        r.report_progress = Mock()
+        sequence = []
+        for name in ('sweep', 'stories', 'memoirs', 'missions', 'exchange'):
+            setattr(r, name, lambda name=name: sequence.append(name))
+        with TemporaryDirectory() as folder, patch('pcrscript.tasks.event_battle.EventBattles') as battles:
+            r.ui = SimpleNamespace(output=Path(folder), save=Mock())
+            battles.return_value.first_clear.side_effect = lambda: sequence.append('first_clear')
+            battles.return_value.bosses.side_effect = lambda: sequence.append('bosses')
+            self.assertEqual(r.run()['status'], 'complete')
+        self.assertEqual(sequence, ['first_clear', 'stories', 'bosses', 'sweep', 'memoirs', 'missions', 'exchange'])
 
 
 

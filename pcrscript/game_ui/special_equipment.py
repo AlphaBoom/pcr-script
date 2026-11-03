@@ -189,7 +189,12 @@ def inspect_special_equipment(ui: EventUI, order: list[str]) -> dict:
                 items=loadout_items(panel.image))
 
 
-def auto_equip_special(ui: EventUI, order: list[str], *, priorities=None) -> dict:
+def formation_settled(screen):
+    """The commit's connection overlay keeps the title visible but swallows taps and shows a stale power."""
+    return bool(screen.find('队伍编组',(300,0,650,70),exact=True) and not screen.find('正在进行数据连接'))
+
+
+def auto_equip_special(ui: EventUI, order: list[str], *, priorities=None, verify_slots=True) -> dict:
     """Use the game's automatic EX loadout and verify the committed slots."""
     priorities = validate_auto_priorities({} if priorities is None else priorities)
     screen=ui.capture()
@@ -222,24 +227,37 @@ def auto_equip_special(ui: EventUI, order: list[str], *, priorities=None) -> dic
     if any(v is None for col in selected for v in col):
         cancel_special_equipment(ui, preview)
         ui.wait(lambda s:s.find('队伍编组',(300,0,650,70),exact=True),'取消未知特别装备预览')
-        raise EventUIError('特别装备自动选择后槽位无法识别，未提交')
+        if verify_slots:
+            raise EventUIError('特别装备自动选择后槽位无法识别，未提交')
+        return dict(order=list(order),before=before,selected=selected,slots=before,
+                    changed=False,applied=False,actual_verified=False,
+                    evidence=before_evidence,reason='预览未识别，保持原装备进行免费模拟')
     changed=equipment_changed(panel.image,preview.image)
     if changed:
         ui.expect_click('装备确定',(705,447,925,515),exact=True)
-        formation=ui.wait(lambda s:s.find('队伍编组',(300,0,650,70),exact=True),'特别装备提交后编队')
+        formation=ui.wait(formation_settled,'特别装备提交后编队')
     else:
         ui.expect_click('取消',(35,445,265,520),exact=True)
         formation=ui.wait(lambda s:s.find('队伍编组',(300,0,650,70),exact=True),'特别装备无变化返回编队')
     after_power=formation.number((505,375,590,402))
+    if not verify_slots:
+        # A free simulator tests the actual equipped state. Reopening every
+        # slot and comparing it with the preview adds no battle evidence.
+        return dict(order=list(order),before=before,selected=selected,slots=None,
+                    changed=changed,applied=changed,actual_verified=False,
+                    before_power=before_power,after_power=after_power,
+                    evidence=selected_evidence,before_evidence=before_evidence,
+                    settings_evidence=settings_evidence,priorities=priorities)
     ui.click((615,454))
     committed=ui.wait(lambda s:s.find('特别装备设定',(320,15,650,65),exact=True),'特别装备提交复核')
     final=occupied_slots(committed.image)
     evidence=str(ui.save('abyss_special_committed_'+tag,committed))
     ui.expect_click('取消',(35,445,265,520),exact=True)
     ui.wait(lambda s:s.find('队伍编组',(300,0,650,70),exact=True),'特别装备复核后编队')
-    if final!=selected:
+    if verify_slots and final!=selected:
         raise EventUIError('特别装备提交前后槽位状态不一致，停止开战')
     return dict(order=list(order),before=before,selected=selected,slots=final,
+                actual_verified=True,preview_matched=final==selected,
                 empty=sum(v is False for col in final for v in col),
                 unknown=sum(v is None for col in final for v in col),
                 before_power=before_power,after_power=after_power,changed=changed,

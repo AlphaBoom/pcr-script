@@ -5,11 +5,41 @@ from unittest import TestCase
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 import numpy as np
-from pcrscript.game_ui.character_stars import five_star_shards, unlocked_stars, active_stars, purchase_receipt, price_tier_notice, star_confirmation_ready, star_result_step, star_upgrade_settled, buy_shards, reduce_purchase_amount, memory_fragment_visible, settle_purchase_receipt
+from pcrscript.game_ui.character_stars import five_star_shards, unlocked_stars, active_stars, purchase_receipt, price_tier_notice, star_confirmation_ready, star_result_step, star_upgrade_settled, buy_shards, reduce_purchase_amount, memory_fragment_visible, settle_purchase_receipt,restore_unlocked_five
 from pcrscript.game_ui.screen import EventUIError, EventScreen, TextBox
 
 
 class StarBudgetTests(TestCase):
+    def test_free_restore_never_unlocks_a_locked_fifth_star(self):
+        from ui_fixtures import screen
+        s=screen(('角色强化',125,30),('合成角色的记忆碎片',650,130))
+        for x in (171,212,253,294):s.image[318:350,x-12:x+12]=(0,190,255)
+        ui=Mock()
+        self.assertFalse(restore_unlocked_five(ui,'合成角色',{},Mock(),screen=s))
+        ui.click.assert_not_called()
+
+    def test_free_restore_switches_blue_unlocked_star_without_purchase(self):
+        from ui_fixtures import screen
+        before=screen(('角色强化',125,30),('合成角色的记忆碎片',650,130))
+        after=screen(('角色强化',125,30))
+        for i,x in enumerate((171,212,253,294,335)):
+            before.image[318:350,x-12:x+12]=(0,190,255) if i<4 else (255,150,0)
+            after.image[318:350,x-12:x+12]=(0,190,255)
+        dialog=screen(('★变更确认',480,43),('现在的★',550,110),('变更',590,480),blue=('变更',))
+        ui=Mock();ui.capture.return_value=dialog;ui.save.return_value=Path('synthetic.png')
+        frames=iter([dialog,after])
+        def wait(predicate,label):
+            value=next(frames)
+            self.assertTrue(predicate(value))
+            return value
+        ui.wait.side_effect=wait
+        report={}
+        with patch('pcrscript.game_ui.character_stars.buy_shards') as purchase:
+            self.assertTrue(restore_unlocked_five(ui,'合成角色',report,Mock(),screen=before))
+        purchase.assert_not_called()
+        self.assertEqual(report['star_changes'][0]['cost'],0)
+        self.assertEqual(report['star_changes'][0]['status'],'confirmed')
+
     def test_shop_ocr_selects_only_exact_costume_across_split_labels(self):
         rows=[('干歌（夏日）的记忆',330,224),('碎片',290,240),
               ('干歌（圣诞节）的记',500,224),('忆碎片',455,240)]

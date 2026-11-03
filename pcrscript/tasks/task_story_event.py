@@ -8,7 +8,7 @@ from ..game_ui.screen import EventScreen
 if TYPE_CHECKING:
     from pcrscript import Robot
 import re
-from ..run_session import atomic_json, clock as time, failure
+from ..run_session import atomic_json, clock as time, failure, checkpoint
 
 from ..game_ui.screen import EventUI, EventUIError, normalized
 from ..game_ui.dawn_labyrinth import navigation_exit as maze_navigation_exit
@@ -24,6 +24,8 @@ class CampaignClean(TimeLimitTask):
         super().__init__(robot)
         self.robot = robot
         self.options = self.task_options() if options is None else options
+        if type(self.options.get('collect_house_stamina', True)) is not bool:
+            raise ValueError('collect_house_stamina必须为布尔值')
         self.ui = EventUI(robot.driver, self.options.get("output", "cache/daily/story_event"))
         self.report: TaskReport = {"status": "running", "steps": [], "pending": [], "battles": []}
         self.deadline = time.monotonic() + self.options.get("timeout", 1800)
@@ -37,11 +39,18 @@ class CampaignClean(TimeLimitTask):
         self.report["steps"].append(message)
 
     def check_deadline(self) -> None:
+        checkpoint()
         if time.monotonic() > self.deadline:
             raise EventUIError("活动任务达到总运行时间上限")
 
     def entry_dialog(self, s: EventScreen) -> bool:
         """Advance verified event tutorials or dismiss the daily login receipt."""
+        if (s.find('解锁首领战', (300, 110, 660, 185), exact=True)
+                and s.find(r'首领战[（(](?:剧本模式|特别|特别战斗\+)[）)]', (410, 225, 690, 285), exact=True)
+                and s.find('已解锁。?', (410, 265, 620, 310), exact=True)):
+            self.ui.save('boss_unlocked', s)
+            self.ui.expect_click('关闭', (350, 340, 615, 410), exact=True)
+            return True
         if s.find('帮助', (300, 0, 700, 70), exact=True) and s.find('剧情活动', (50, 90, 250, 150)):
             self.ui.expect_click('关闭', (350, 440, 615, 515), exact=True)
             return True
@@ -224,7 +233,14 @@ class CampaignClean(TimeLimitTask):
             elif s.find('自动推进设定', (200, 0, 750, 80), exact=True):
                 self.ui.expect_click('取消', (250, 420, 480, 520), exact=True)
             elif s.find(r"BOSS详情|关卡详情|队伍编组|活动关卡[HN]-\d+", (0, 0, 730, 85)):
-                self.ui.expect_click("取消", (550, 420, 950, 520), exact=True)
+                cancel = s.find('取消', (550, 420, 950, 520), exact=True)
+                if cancel:
+                    self.ui.click(cancel)
+                else:
+                    # A native settlement can replace the old detail while
+                    # its cancel button has already disappeared. Re-observe
+                    # so entry_dialog can handle the arriving reward modal.
+                    time.sleep(.7)
             elif not self.story_dialog(s):
                 time.sleep(.7)
         raise EventUIError("未能返回活动首页")
@@ -239,27 +255,44 @@ class CampaignClean(TimeLimitTask):
             self.ui.click(item)
             self.ui.wait(lambda s: s.event_quests, "活动关卡入口")
         self.ui.expect_click("首领战" if bosses else "活动关卡", (450, 55, 950, 95), exact=True)
+        tab_retries = 0
         def ready(frame):
+            nonlocal tab_retries
             if self.entry_dialog(frame):
                 return False
-            return bool(frame.find("剧本模式|特别", (700, 150, 940, 440))) if bosses else bool(
-                frame.find(r"活动关卡[HN]-\d", (460, 140, 920, 465)))
+            levels = bool(frame.find(r"活动关卡[HN]-\d", (460, 140, 920, 465)))
+            boss_rows = bool(frame.find("剧本模式|特别", (700, 150, 940, 440)))
+            if (levels if bosses else boss_rows) and tab_retries < 2:
+                target = frame.find('首领战' if bosses else '活动关卡', (450, 55, 950, 95), exact=True)
+                if target and target.score >= .95:
+                    self.ui.click(target)
+                    tab_retries += 1
+                return False
+            return boss_rows if bosses else levels
         return self.ui.wait(ready, "关卡列表")
 
     def event_identity(self) -> str:
         """Read the list-layout event's own title when calendars lag behind."""
         names = []
+        title_parts = []
         for _ in range(2):
             s = self.home()
             if not s.find(r'举办时间.*\d+/\d+', (300, 420, 680, 465)):
                 raise EventUIError('当前活动举办时间未确认')
-            lines = s.all(r'^[\u4e00-\u9fff·]{6,30}$', (310, 350, 645, 425))
-            if len(lines) != 1:
+            lines = s.all(r'^[\u4e00-\u9fffA-Za-z·]{4,50}$', (300, 280, 680, 425))
+            if not 1 <= len(lines) <= 2:
                 raise EventUIError('当前活动中文标题未能唯一确认')
-            names.append(normalized(lines[0].text))
+            parts = [normalized(line.text) for line in sorted(lines, key=lambda line: line.center[1])]
+            names.append(''.join(parts))
+            title_parts.append(parts)
             self.ui.save('event_identity_' + str(len(names)), s)
             time.sleep(.5)
-        if SequenceMatcher(None, names[0], names[1]).ratio() < .8:
+        # Decorative main/subtitle boxes can overlap vertically, making OCR
+        # reverse their center order. Keep both orders as candidates; the
+        # independently read plain help heading must still validate each.
+        variants = [[parts, parts[::-1]] if len(parts) == 2 else [parts] for parts in title_parts]
+        if max(SequenceMatcher(None, ''.join(a), ''.join(b)).ratio()
+               for a in variants[0] for b in variants[1]) < .8:
             raise EventUIError('当前活动标题多帧不一致')
         # Decorative title fonts can produce the same wrong OCR twice. Read
         # the plain heading in this event's help and cross-check the two views.
@@ -275,21 +308,52 @@ class CampaignClean(TimeLimitTask):
                 help_attempts += 1
                 self.ui.click((button.center[0], max(20, button.center[1]-25)), delay=1.5)
         self.ui.wait(lambda f: f.find('帮助', (300, 0, 700, 70), exact=True)
-                     and len(f.all(r'^[\u4e00-\u9fff·]{6,30}$', (180, 145, 720, 205))) == 1,
+                     and len(f.all(r'^[\u4e00-\u9fffA-Za-z·\s]{6,60}$', (180, 145, 820, 205))) == 1,
                      '活动帮助标题加载', handle=retry_help)
         headings = []
         for _ in range(2):
             help_screen = self.ui.capture()
-            titles = help_screen.all(r'^[\u4e00-\u9fff·]{6,30}$', (180, 145, 720, 205))
+            titles = help_screen.all(r'^[\u4e00-\u9fffA-Za-z·\s]{6,60}$', (180, 145, 820, 205))
             if len(titles) != 1:
                 raise EventUIError('活动帮助中的当前标题未能唯一确认')
             headings.append(normalized(titles[0].text))
             self.ui.save('event_help_identity_' + str(len(headings)), help_screen)
             time.sleep(.5)
+        title_parts = [max(orders, key=lambda parts: SequenceMatcher(None,headings[0],''.join(parts)).ratio())
+                       for orders in variants]
+        names = [''.join(parts) for parts in title_parts]
         if headings[0] != headings[1] or any(SequenceMatcher(None, headings[0], name).ratio() < .8 for name in names):
             raise EventUIError('当前活动帮助标题与首页不一致')
-        self.ui.expect_click('关闭', (350, 440, 615, 515), exact=True)
+        closing = self.ui.wait(lambda frame: frame.event_home or (
+            frame.find('帮助',(300,0,700,70),exact=True)
+            and frame.find('关闭',(350,440,615,515),exact=True)), '活动帮助返回入口')
+        if not closing.event_home:
+            self.ui.click(closing.find('关闭',(350,440,615,515),exact=True))
+            self.ui.wait(lambda frame: frame.event_home, '返回活动首页')
         self.report['event_identity'] = {'name': headings[0], 'home_title': names[0], 'basis': 'live_help_and_home'}
+        aliases = []
+        try:
+            from ..news import fetch_event_news
+            current = fetch_event_news().hatsune
+            canonical = re.sub(r'^剧情活动[：:]\s*', '', current.name) if current else ''
+            parts = canonical.split()
+            if normalized(canonical) == headings[0] and len(parts) > 1 and all(len(p) >= 3 for p in parts):
+                aliases = parts
+                self.report['event_identity']['alias_basis'] = 'catalogue_matches_live_help'
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        # Preserve the game's title/subtitle boundaries for public searches.
+        # Correct decorative-font OCR using the cross-checked plain heading;
+        # never turn an unverified arbitrary substring into an event alias.
+        if (not aliases and len(title_parts[0]) > 1 and [len(p) for p in title_parts[0]] == [len(p) for p in title_parts[1]]
+                and sum(map(len, title_parts[0])) == len(headings[0])):
+            aliases, offset = [], 0
+            for part in title_parts[0]:
+                aliases.append(headings[0][offset:offset+len(part)])
+                offset += len(part)
+        if aliases:
+            self.options.setdefault('sources', {})['aliases'] = aliases
+            self.report['event_identity']['title_parts'] = aliases
         return headings[0]
 
     def stories(self) -> None:
@@ -305,7 +369,7 @@ class CampaignClean(TimeLimitTask):
         for _ in range(300):
             self.check_deadline()
             s = self.ui.capture()
-            if self.story_dialog(s):
+            if self.entry_dialog(s) or self.story_dialog(s):
                 idle = 0
                 continue
             if s.find("加载中|下载中|数据连接"):
@@ -487,10 +551,32 @@ class CampaignClean(TimeLimitTask):
         raise EventUIError('特别章节读取达到步骤上限')
 
     def sweep(self, hard: bool = True) -> None:
-        if hard:
-            from .event_sweep import HardSweep
-            return HardSweep(self).run()
-        return self.sweep_normal()
+        from .event_sweep import HardSweep
+        attempt = HardSweep(self).run if hard else self.sweep_normal
+        result = attempt()
+        shortages = ('体力不足以完成困难批量扫荡，继续领奖；未购买体力',
+                     '体力不足，尚有普通关卡可扫荡', '系统扫荡体力不足；未购买体力')
+        insufficient = next((text for text in shortages if text in self.report['pending']), None)
+        if (insufficient and (result is False or not hard)
+                and self.options.get('collect_house_stamina', True)):
+            from ..game_ui.guild_house import collect_produced_stamina
+            from .task_home import ToHomePage
+            page = self.home()
+            try:
+                receipt = collect_produced_stamina(self.ui, page)
+            except EventUIError as error:
+                self.report['pending'].append('公会之家免费体力：' + str(error))
+                ToHomePage(self.robot).run(timeout=60)
+                self.enter()
+                return False
+            self.report.setdefault('house_stamina', []).append(receipt)
+            ToHomePage(self.robot).run(timeout=60)
+            self.enter()
+            if receipt.get('empty'):
+                return False
+            self.report['pending'].remove(insufficient)
+            return attempt()
+        return result
 
     def sweep_normal(self) -> None:
         """Optional normal-stage sweeps using the player's remaining stamina."""
@@ -713,13 +799,15 @@ class CampaignClean(TimeLimitTask):
             stages = []
             if self.options.get("first_clear", False):
                 stages.append(('首次过关', battles.first_clear))
+            if self.options.get('bosses', False) and self.options.get('stories', True):
+                stages.append(('剧情', self.stories))
             if self.options.get("bosses", False):
                 stages.append(('首领', battles.bosses))
             if hard_chapter:
                 stages.append(('困难扫荡', self.sweep))
             if exhaust_power:
                 stages.append(('普通扫荡', lambda: self.sweep(hard=False)))
-            if self.options.get("stories", True):
+            if self.options.get("stories", True) and not self.options.get('bosses', False):
                 stages.append(('剧情', self.stories))
             if self.options.get("memoirs", True):
                 stages.append(('回忆录', self.memoirs))

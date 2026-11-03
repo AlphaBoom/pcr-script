@@ -291,6 +291,18 @@ class DungeonTests(TestCase):
                 for call in ui.expect_click.call_args_list:
                     self.assertIn(call.args[0],('才能开花','专用装备'))
 
+    def test_uninstalled_equipment_page_does_not_claim_unreleased_or_spend(self):
+        ui = Mock()
+        observed = frame(('角色强化',120,30),('装备属性值',550,265),('装备',800,437))
+        def wait(predicate, description):
+            self.assertTrue(predicate(observed))
+            return observed
+        ui.wait.side_effect = wait
+        with patch('pcrscript.game_ui.character_equipment.open_character_memory', return_value=observed):
+            self.assertIsNone(inspect_unreleased_equipment(ui,'合成角色'))
+        ui.expect_click.assert_called_once_with('专用装备', (775,55,860,95), exact=True)
+        ui.click.assert_not_called()
+
     def test_character_search_input_failure_blocks_equipment_claim(self):
         ui=Mock()
         ui.capture.return_value=frame(('角色一览',120,30),('重置',689,90))

@@ -29,12 +29,15 @@ class TaskPageNavigation(Action):
         from ..game_ui.event_layout import navigation_exit as story_exit
         from ..game_ui.battle_stadium import navigation_exit as stadium_exit
         from ..game_ui.collaboration_raid import navigation_exit as collaboration_exit
+        from ..game_ui.tower import navigation_exit as tower_exit
+        from ..game_ui.navigation import exploration_list_exit, battle_result_exit
         if self.ui is None:
             output = getattr(robot, '_task_output', None) or 'cache/daily/navigation'
             self.ui = EventUI(robot.driver, output)
         screen = self.ui.observe(screenshot)
-        target = (maze_exit(screen) or recollection_exit(screen) or subjugation_exit(screen)
-                  or stadium_exit(screen) or story_exit(screen) or collaboration_exit(screen))
+        target = (exploration_list_exit(screen) or battle_result_exit(screen) or maze_exit(screen)
+                  or recollection_exit(screen) or subjugation_exit(screen)
+                  or stadium_exit(screen) or story_exit(screen) or collaboration_exit(screen) or tower_exit(screen))
         if target is not None:
             self.ui.click(target)
             return
@@ -42,10 +45,33 @@ class TaskPageNavigation(Action):
             raise EventUIError('联动报酬列表未确认两类报酬均已抽空，不能自动返回首页')
         if screen.find(r'\d:\d{2}', (750, 0, 850, 55)) and screen.find('菜单', (840, 0, 960, 65), exact=True):
             raise EventUIError('存在未结算战斗，不能自动返回首页')
+        login_area = (250, 70, 710, 455)
+        if screen.find('正在进行数据连接|加载中[.。…]*', exact=True):
+            return
+        record = screen.find('登录记录', login_area, exact=True)
+        switch = screen.find('切换其他账号', login_area, exact=True)
+        credential = screen.find('请输入手机号|账号密码|bilibili游戏', (200, 50, 760, 480), exact=True)
+        if record is not None or switch is not None or credential is not None:
+            logins = screen.all('^登录$', login_area)
+            if (record is not None and switch is not None and len(logins) == 1
+                    and min(record.score,switch.score,logins[0].score) >= .95
+                    and record.center[1] < logins[0].center[1] < switch.center[1]):
+                self.ui.click(logins[0])
+                return
+            raise EventUIError('登录窗口未确认可用的已保存账号，已停止自动点击；请在游戏内完成登录')
+        if not screen.items:
+            for action in self.fallback:
+                if isinstance(action, ClickAction) and action.template is not None and action.pos is None:
+                    action.bindTask(self.task).do(screenshot, robot)
+            return
+        if screen.find('正在进行数据连接|加载中[.。…]*', exact=True):
+            return
         start = screen.find('点击屏幕开始游戏', (260, 450, 710, 535), exact=True)
         menu = screen.find('主菜单', (0, 460, 200, 540), exact=True)
         if start is not None and menu is not None and min(start.score, menu.score) >= .95:
             self.ui.click(start)
+            return
+        if start is not None:
             return
         for action in self.fallback:
             action.bindTask(self.task).do(screenshot, robot)

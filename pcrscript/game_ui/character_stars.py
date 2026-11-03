@@ -21,6 +21,12 @@ def unlocked_stars(screen):
     return int(count)
 
 
+def star_maxed(screen):
+    """The bloom page's own text; a six-star page's star row does not count as five."""
+    return bool(screen.find('已才能开花至最高',(470,300,925,360))
+                or screen.find('纯净记忆碎片',(470,105,925,160)))
+
+
 def active_stars(screen):
     hsv=cv.cvtColor(screen.image,cv.COLOR_BGR2HSV)
     return sum(float(np.mean((hsv[318:350,x-12:x+12,0]>12)&(hsv[318:350,x-12:x+12,0]<38)
@@ -174,6 +180,11 @@ def buy_shards(ui,name,missing,report,save,allow_amulets):
     else:
         raise EventUIError('碎片获取列表未找到女神的秘石商店')
     ui.wait(lambda s:s.find('商店',(40,0,200,65),exact=True),'秘石商店')
+    buy_from_open_shop(ui,name,missing,report,save)
+
+
+def buy_from_open_shop(ui,name,missing,report,save,*,total=None):
+    """Buy a costume's memory fragments; total derives the gap from the dialog's count."""
     for batch in range(20):
         s=ui.capture()
         # Filter the shop by the exact base name, then verify the outfit on
@@ -196,6 +207,10 @@ def buy_shards(ui,name,missing,report,save,allow_amulets):
         owned=number(s,(630,248,705,286))
         if owned is None:owned=ui.number(s,(675,254,700,279))
         if before is None or owned is None:raise EventUIError('秘石余额或碎片持有数不明确')
+        if total is not None:
+            missing=total-owned
+            total=None
+            if missing<=0:raise EventUIError('碎片已足够但仍缺材料，未购买')
         ui.expect_click('MAX',(590,285,700,335),exact=True);s=ui.capture()
         amount=number(s,(440,290,520,329))
         if amount is None:raise EventUIError('购买数量无法确认')
@@ -236,6 +251,33 @@ def star_change_dialog_ready(frame):
                 and frame.find('现在的★',(200,85,870,145),exact=True))
 
 
+def restore_unlocked_five(ui,name,report,save,*,screen=None):
+    """Switch an already unlocked five-star unit; never unlock or buy stars."""
+    s=screen if screen is not None else open_character_memory(ui,name)
+    if s is None:
+        raise EventUIError('星级切换的角色身份未确认')
+    if unlocked_stars(s)!=5:return False
+    current=active_stars(s)
+    if current==5:return False
+    if not re.search(re.escape(normalized(name))+r'的(?:纯净)?记忆碎片',
+                     memory_fragment_text(s,name,(470,105,925,160))):
+        raise EventUIError('星级切换的角色身份未确认')
+    if current not in (3,4):raise EventUIError('当前生效星级未知，未切换')
+    ui.click((34,98))
+    dialog=ui.wait(star_change_dialog_ready,'星级变更')
+    ui.click((780,146));dialog=ui.capture()
+    button=dialog.find('变更',(480,450,710,515),exact=True)
+    if not dialog.blue_button(button):raise EventUIError('五星星级变更按钮不可用')
+    record=dict(name=name,before=current,target=5,cost=0,status='pending',
+                evidence=str(ui.save('unlocked_star_change',dialog)))
+    report.setdefault('star_changes',[]).append(record);save()
+    ui.click(button)
+    after=ui.wait(lambda frame:frame.find('角色强化',(40,0,250,65),exact=True)
+                  and active_stars(frame)==5,'星级设置完成')
+    record.update(status='confirmed',after=str(ui.save('unlocked_star_changed',after)));save()
+    return True
+
+
 def upgrade_to_five(ui,name,report,save,*,allow_amulets=False):
     report.update(name=name,purchases=[],upgrades=[],status='checking');save()
     for step in range(5):
@@ -243,22 +285,7 @@ def upgrade_to_five(ui,name,report,save,*,allow_amulets=False):
         if s is None:raise EventUIError('培养页面未确认角色衣装')
         stars=unlocked_stars(s)
         if stars==5:
-            # Blue stars are already unlocked but currently reduced by ★变更.
-            current=active_stars(s)
-            if current<5:
-                ui.click((34,98))
-                dialog=ui.wait(lambda frame:frame.find('★变更确认',(250,0,710,75),exact=True),'星级变更')
-                if not star_change_dialog_ready(dialog):
-                    raise EventUIError('星级变更弹窗内容未知')
-                ui.click((780,146));dialog=ui.capture()
-                button=dialog.find('变更',(480,450,710,515),exact=True)
-                if not dialog.blue_button(button):raise EventUIError('五星星级变更按钮不可用')
-                record=dict(before=current,target=5,status='pending',evidence=str(ui.save('five_star_change',dialog)))
-                report['upgrades'].append(record);save()
-                ui.click(button)
-                ui.wait(lambda frame:frame.find('角色强化',(40,0,250,65),exact=True)
-                        and active_stars(frame)==5,'星级设置完成')
-                record['status']='confirmed';save()
+            restore_unlocked_five(ui,name,report,save,screen=s)
             report.update(status='complete',target=5);save();return
         if not 1<=stars<5:raise EventUIError('当前解锁星级无法确认，未升星')
         fraction=s.find(r'\d+/\d+',(710,253,835,293),exact=True)

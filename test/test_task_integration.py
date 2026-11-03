@@ -84,7 +84,7 @@ class TaskIntegrationTests(TestCase):
         from pcrscript.tasks import TeamFormation, TeamFormationEx, Combat, Event, EventNews, TimeLimitTask
         expected = {'adventure_daily','arena','campaign_clean','caravan','dungeon_first_clear','upgrade_all_characters','max_character_bonds','abyss_push',
                     'clear_campaign_first_time','clear_story','common_adventure','free_gacha','get_gift',
-                    'get_quest_reward','luna_tower_clean','normal_gacha',
+                    'get_quest_reward','luna_tower_clean','luna_tower_climb','normal_gacha',
                     'princess_arena','quick_clean','research','revival_event_once','schedule','shop_buy','team_battle','tohomepage','dawn_labyrinth','dawn_labyrinth_first_clear',
                     'recollection','recollection_first_clear','abyss_subjugation','battle_stadium','collaboration_raid'}
         self.assertEqual(set(registered_tasks()), expected)

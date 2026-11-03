@@ -148,14 +148,32 @@ def event_parties(report: dict, area: str, difficulty: str, mode: int) -> list[E
     return result
 
 
-def event_trial_parties(report: dict, area: str, difficulty: str, mode: int, *, require_settings: bool = False) -> list[EventParty]:
+def event_trial_parties(report: dict, area: str, difficulty: str, mode: int, *, require_settings: bool = False,
+                       allow_phase_continuation: bool = False,
+                       allow_limited_phase_continuation: bool = False) -> list[EventParty]:
     """Keep incomplete guide builds as clearly marked account-trial seeds."""
     result = []
     for party in report.get('parties', []):
         scope = party.get('scope', {})
         members = party.get('members', [])
         names = [m.get('name') for m in members]
-        if require_settings and (party.get('region') != 'cn'
+        if any(member.get(key, {}).get('conflicts') for member in members for key in BUILD_FIELDS):
+            continue
+        continuation = scope.get('mode') != mode
+        if continuation:
+            proofs = { (e.get('cid'), e.get('seconds'))
+                for row in party.get('phase_coverage', []) if row.get('mode') == mode
+                and (e := row.get('evidence', {})).get('method') == 'combat_phase'
+                and e.get('source') == party.get('source')
+                and type(e.get('confidence')) in (int, float) and e['confidence'] >= .97
+                and type(e.get('cid')) is int and type(e.get('seconds')) in (int,float) }
+            permitted = ((difficulty == 'special' and allow_phase_continuation)
+                         or (difficulty == 'special_plus' and allow_limited_phase_continuation))
+            if (not permitted
+                    or type(scope.get('mode')) is not int or not 1 <= scope['mode'] < mode <= 3
+                    or len(proofs) < 2):
+                continue
+        if (require_settings or continuation) and (party.get('region') != 'cn'
                 or party.get('global_requirements') or party.get('manual_actions')
                 or type(party.get('auto', {}).get('value')) is not bool
                 or not party.get('auto', {}).get('evidence') or party.get('auto', {}).get('conflicts')
@@ -164,12 +182,14 @@ def event_trial_parties(report: dict, area: str, difficulty: str, mode: int, *, 
                        for m in members)):
             continue
         if (scope.get('area') != area or scope.get('difficulty') != difficulty
-                or scope.get('mode') != mode or not party.get('scope_verified')
+                or not party.get('scope_verified')
                 or party.get('region') not in ('cn', 'unknown')
                 or len(names) != 5 or len(set(names)) != 5
                 or any(not isinstance(n, str) or not n.strip() or n.startswith('unit:') for n in names)):
             continue
         assumptions = list(party.get('pending', []))
+        if continuation:
+            assumptions.append(f"来源同队连续战斗中两帧确认模式{mode}；账号从此模式重新开战，起始TP与来源连续战斗不同，按有限本地试打核验")
         requirements = []
         for member in members:
             instant = member.get('instant', {}).get('value')
@@ -178,8 +198,11 @@ def event_trial_parties(report: dict, area: str, difficulty: str, mode: int, *, 
                 assumptions.append(member['name']+'.SET未知，试打暂按开启')
             requirements.append(MemberRequirement(member['name'], 1, 1, 1,
                 None, None, instant, 1))
-        result.append(EventParty(party['id']+'-trial', party['source'], requirements,
-            max_attempts=1, build_basis='local_trial', assumptions=assumptions,
+        result.append(EventParty(party['id']+(f'-phase{mode}' if continuation else '')+'-trial', party['source'], requirements,
+            max_attempts=3 if continuation else 1, build_basis='local_trial', assumptions=assumptions,
+            declared_build={normalized(m['name']): {key:m[key]['value'] for key in BUILD_FIELDS
+                if key != 'instant' and m.get(key, {}).get('value') is not None
+                and m[key].get('evidence')} for m in members},
             auto=party.get('auto', {}).get('value') if type(party.get('auto', {}).get('value')) is bool else True))
     return result
 

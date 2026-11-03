@@ -19,6 +19,7 @@
 | 深渊讨伐战开放期、前哨与首领日常 | [使用指南](guides/abyss-subjugation.md)、[游戏页面与规则](game-knowledge/abyss-subjugation.md) |
 | 联动讨伐活动首通与日常 | [使用指南](guides/collaboration-raid.md)、[游戏页面与规则](game-knowledge/collaboration-raid.md) |
 | 斗技场本期满星与报酬 | [使用指南](guides/battle-stadium.md)、[游戏页面与规则](game-knowledge/battle-stadium.md) |
+| 露娜塔新版入口、回廊与普通爬塔 | [使用指南](guides/luna-tower.md)、[游戏页面与规则](game-knowledge/luna-tower.md) |
 | 游戏中的页面、角色与机制 | [游戏知识](game-knowledge/README.md) |
 | 公会之家体力的游戏入口与回执 | [公会之家](game-knowledge/guild-house.md) |
 | 尚需真实环境的工程验收 | [工程待办](pending-validation.md) |

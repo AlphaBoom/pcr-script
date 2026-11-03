@@ -9,7 +9,7 @@ from .task_shop import ShopBuy
 from .task_story import ClearStory, GetQuestReward
 from .task_routines import Arena, PrincessArena, Research, Schedule
 from .task_combat import TeamFormation, TeamFormationEx, Combat
-from .task_tower import LunaTowerClean
+from .task_tower import LunaTowerClean, LunaTowerClimb
 from .task_gifts import GetGift
 from .task_story_event import CampaignClean, ClearCampaignFirstTime
 from .task_revival_event import RevivalEventOnce

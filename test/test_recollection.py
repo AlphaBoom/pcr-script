@@ -590,6 +590,17 @@ class RecollectionTests(TestCase):
             self.assertEqual([call.args[0].text for call in task.ui.click.call_args_list],
                              ['关闭','冒险','追忆的战场'])
 
+    def test_entry_closes_exploration_list_left_by_previous_daily_task(self):
+        with TemporaryDirectory() as root:
+            task=self.make_task(root,Game())
+            task.ui=Mock(output=Path(root))
+            task.ui.capture.side_effect=[
+                screen(('探险队伍一览',480,42),('撤退',620,165),('关闭',480,480)),
+                screen(('冒险',100,30),('追忆的战场',800,365)),
+                screen(('追忆的战场',160,30),('追忆战',210,375),('追忆战·霸',760,375))]
+            self.assertTrue(field.home(task.enter()))
+            self.assertEqual([c.args[0].text for c in task.ui.click.call_args_list],['关闭','追忆的战场'])
+
     def test_joint_entry_labels_allow_lower_confidence_purple_navigation_card(self):
         with TemporaryDirectory() as root:
             game=Game();game.page='home'

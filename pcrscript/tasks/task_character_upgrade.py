@@ -127,7 +127,7 @@ class UpgradeAllCharacters(BaseTask):
             if not s.blue_button(button):
                 raise EventUIError('本批强化不可执行')
             self.ui.click(button)
-            phrase = '品级提升' if mode == 'rank' else '自动强化'
+            phrase = '(?:自动)?(?:品级提升|提升品级)' if mode == 'rank' else '自动强化'
             s = self.ui.wait(lambda s: s.find('一?键'+phrase+'确认', (270, 20, 700, 60), exact=True), '批量强化确认')
             self.ui.save(f'{mode}_{batch:02d}_confirm', s)
             self.ui.expect_click('确认', (480, 450, 710, 510), exact=True)

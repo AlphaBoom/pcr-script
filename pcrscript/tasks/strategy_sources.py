@@ -12,7 +12,7 @@ from ..extras.bilibili_api import BilibiliApi
 from ..run_session import atomic_json, clock as time
 from .strategy_inputs import fixed_set_statement,preferred_sources,validate_urls,video_metadata
 
-PARSER_VERSION = 27
+PARSER_VERSION = 29
 
 MANUAL_PART = re.compile(r'半自动|手动|目押|卡轴|(?:\d+|[一二三四五六七八九十])押|改星|调星|切星|降星|星级变更|TP\s*\+\s*2|大师点', re.I)
 BORROW_PART = re.compile(r'借(?:人|角|用|好友|支援|[A-Za-z]|[\u4e00-\u9fff])|使用支援')
@@ -104,8 +104,12 @@ def recollection_collection(text: str, area: str, stage: str) -> bool:
 
 
 def source_queries(terms: list[str], stage: str, effort: str, *, kind: str,
-                   element: str | None = None) -> list[str]:
+                   element: str | None = None, region: str = 'cn', difficulty: str | None = None) -> list[str]:
     queries = ['公主连结 '+term+' '+stage+' 攻略' for term in terms[:3]]
+    if kind in ('event', 'revival'):
+        server = {'cn': '国服', 'jp': '日服', 'tw': '台服'}[region]
+        label = 'SP+' if difficulty == 'special_plus' else 'SP'
+        queries = ['公主连结 '+server+' '+term+' '+label+' 作业' for term in terms[:3]] + queries
     if stage:
         queries.append('公主连结 '+terms[min(1, len(terms)-1)]+' 攻略')
     if kind == 'recollection':
@@ -233,7 +237,8 @@ def discover_sources(options: dict, *, api=None, check=lambda: None, exclude_sou
     if type(limit) is not int or not 1 <= limit <= 30 or type(ttl) not in (int,float) or not 0 <= ttl <= 720:
         raise ValueError('max_videos应为1–30，max_age_hours应为0–720')
     queries = configured_queries(rules.queries(options) if rules.queries else
-        source_queries(terms, stage, effort, kind=kind, element=options.get('element')), options)
+        source_queries(terms, stage, effort, kind=kind, element=options.get('element'), region=region,
+                       difficulty=options.get('difficulty')), options)
     scope = dict(task_type=kind,area=area,stage=stage,category_terms=categories,
                  terms=terms,region=region,max_videos=limit,queries=queries,source_urls=urls,
                  element=options.get('element'),search_effort=effort,
@@ -392,6 +397,10 @@ def discover_sources(options: dict, *, api=None, check=lambda: None, exclude_sou
         except (requests.RequestException, ValueError, KeyError, TypeError, RuntimeError, AttributeError) as error:
             errors.append(dict(stage='metadata',bvid=bvid,error=type(error).__name__+': '+str(error)[:240]))
     deferred = []
+    if kind in ('event', 'revival'):
+        plus = re.compile(r'特别(?:战斗)?\s*[＋+]|SP\s*[＋+]', re.I)
+        candidates.sort(key=lambda item: (item['region'] != region,
+            options.get('difficulty') == 'special_plus' and not bool(plus.search(item['title']))))
     if high_search:
         if kind == 'collaboration':
             candidates.sort(key=lambda item: min((p.get('duration') or float('inf') for p in item['pages']), default=float('inf')))

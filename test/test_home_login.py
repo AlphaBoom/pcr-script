@@ -16,6 +16,23 @@ from pcrscript.tasks import EventNews, NormalGacha
 
 
 class LoginStampTests(TestCase):
+    def test_sdk_loading_logo_is_not_an_unusable_login_form(self):
+        observed=screen(('bilibili游戏',480,220),('加载中...',820,490))
+        fallback=Mock();action=TaskPageNavigation(fallback)
+        action.ui=Mock(observe=Mock(return_value=observed))
+        action.do(observed.image,Mock())
+        action.ui.click.assert_not_called()
+        fallback.bindTask.assert_not_called()
+
+    def test_exploration_list_closes_without_retreating_or_shortening_time(self):
+        observed=screen(('探险队伍一览',480,42),('撤退',620,165),
+                        ('缩短时间',730,165),('关闭',480,480))
+        fallback=Mock();action=TaskPageNavigation(fallback)
+        action.ui=Mock(observe=Mock(return_value=observed))
+        action.do(observed.image,Mock())
+        self.assertEqual(action.ui.click.call_args.args[0].text,'关闭')
+        fallback.bindTask.assert_not_called()
+
     def test_stamp_board_skips_and_does_not_click_behind_overlay(self):
         icon = cv.imread('images/btn_skip.png')
         image = np.zeros((540, 960, 3), np.uint8)
@@ -56,7 +73,9 @@ class LoginStampTests(TestCase):
             modal[240:240+modal_icon.shape[0], 450:450+modal_icon.shape[1]] = modal_icon
         state = {'page': start, 'seen': [], 'elapsed': 0}
         from dawn_labyrinth_fixtures import catalogue, guild, home as maze_home
-        recognized = {'maze_catalogue': catalogue(), 'maze_guild': guild(), 'maze_home': maze_home()}
+        recognized = {'maze_catalogue': catalogue(), 'maze_guild': guild(), 'maze_home': maze_home(),
+                      'title':screen(('点击屏幕开始游戏',480,496),('主菜单',70,508)),
+                      'loading':screen(('加载中...',820,490))}
         recognized.update(raid_pool=screen(('当前的列表',480,42), ('重置目标报酬',320,117),
             ('剩余0/2',655,117), ('普通报酬',302,282), ('剩余0/498',646,282),
             ('重置',478,478), blue=('重置',)),
@@ -171,7 +190,33 @@ class LoginStampTests(TestCase):
                     fallback.bindTask.assert_not_called()
                 else:
                     action.ui.click.assert_not_called()
-                    fallback.bindTask.assert_called_once()
+                    fallback.bindTask.assert_not_called()
+
+    def test_saved_account_login_never_uses_home_or_account_switch_clicks(self):
+        observed=screen(('登录记录',480,118),('登录',480,314),('切换其他账号',480,392),
+            ('点击屏幕开始游戏',480,496),('主菜单',70,508))
+        fallback=Mock();action=TaskPageNavigation(fallback)
+        action.ui=Mock(observe=Mock(return_value=observed))
+        action.do(observed.image,Mock())
+        action.ui.click.assert_called_once_with(observed.items[1])
+        fallback.bindTask.assert_not_called()
+        for invalid in (screen(('请输入手机号',480,240),('账号密码',480,410)),
+                        screen(('登录记录',480,118),('切换其他账号',480,392)),
+                        screen(('登录记录',480,118),('登录',480,314),('登录',480,340),('切换其他账号',480,392))):
+            action.ui.observe.return_value=invalid
+            action.ui.click.reset_mock()
+            with self.assertRaisesRegex(EventUIError,'登录窗口'):
+                action.do(invalid.image,Mock())
+            action.ui.click.assert_not_called()
+            fallback.bindTask.assert_not_called()
+
+    def test_black_and_loading_frames_do_not_replay_home_click(self):
+        for observed in (screen(),screen(('加载中...',480,300))):
+            fallback=Mock();action=TaskPageNavigation(fallback)
+            action.ui=Mock(observe=Mock(return_value=observed))
+            action.do(observed.image,Mock())
+            action.ui.click.assert_not_called()
+            fallback.bindTask.assert_not_called()
 
     def test_daily_enters_from_loading_title_and_home_before_running_task(self):
         for start in ('loading', 'title', 'home'):

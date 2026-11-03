@@ -49,7 +49,26 @@ def _query_hatsune_event(conn: sqlite3.Connection):
         else:
             name = "剧情活动"
         return Event(start_time, end_time, name, {"original_event_id":original_event_id})
-    return _query_event_duration(conn, 'hatsune_schedule', select='start_time,end_time,original_event_id', event_producer=gen_result)
+    now = datetime.now(SERVER_TIMEZONE).replace(tzinfo=None).isoformat(' ', 'seconds')
+    return _query_event_duration(conn, 'hatsune_schedule', select='start_time,end_time,original_event_id',
+                                 condition='original_event_id = 0 AND ISO(start_time) <= '
+                                 f'"{now}" AND ISO(end_time) > "{now}"', event_producer=gen_result)
+
+
+def _query_story_event(conn: sqlite3.Connection):
+    """List-layout stories have their own calendar; hatsune retains revivals."""
+    now = datetime.now(SERVER_TIMEZONE).replace(tzinfo=None).isoformat(' ', 'seconds')
+    row = conn.execute(
+        'SELECT schedule_id,event_id,event_type,start_time,end_time FROM seven_schedule '
+        'WHERE ISO(start_time)<=? AND ISO(end_time)>? '
+        'ORDER BY ISO(start_time) DESC,schedule_id DESC LIMIT 1', (now, now)).fetchone()
+    if row is None:
+        return _query_hatsune_event(conn)
+    schedule, identity, kind, start, end = row
+    title = conn.execute('SELECT title FROM seven_event_setting WHERE event_id=?', (identity,)).fetchone()
+    return Event(_event_timestamp(start), _event_timestamp(end),
+                 '剧情活动：'+(title[0].replace('\\n', ' ').strip() if title else str(identity)),
+                 dict(schedule_id=schedule, event_id=identity, event_type=kind, original_event_id=0))
 
 
 def _query_revival_event(conn: sqlite3.Connection):
@@ -58,7 +77,7 @@ def _query_revival_event(conn: sqlite3.Connection):
     row = conn.execute(
         'SELECT event_id, original_event_id, start_time, end_time FROM hatsune_schedule '
         'WHERE original_event_id > 0 AND ISO(start_time) <= ? AND ISO(end_time) > ? '
-        'ORDER BY start_time DESC, event_id DESC LIMIT 1', (now, now)).fetchone()
+        'ORDER BY ISO(start_time) DESC, event_id DESC LIMIT 1', (now, now)).fetchone()
     if row is None:
         return None
     event_id, original_id, start, end = row
@@ -69,7 +88,26 @@ def _query_revival_event(conn: sqlite3.Connection):
 
 
 def _query_tower_event(conn: sqlite3.Connection):
-    return _query_event_duration(conn, 'tower_schedule', desc='露娜塔')
+    def produce(row):
+        start, end, schedule, area = row
+        details = conn.execute('SELECT max_floor_num,cloister_quest_id FROM tower_area_data '
+                               'WHERE tower_area_id=?', (area,)).fetchone()
+        if details is None:
+            raise ValueError('露娜塔当前区域定义缺失，不能判断回廊或最高层')
+        maximum, cloister = details
+        return Event(_event_timestamp(start), _event_timestamp(end), '露娜塔',
+                     dict(schedule_id=schedule, area_id=area, max_floor=maximum,
+                          cloister_quest_id=cloister))
+    event = _query_event_duration(conn, 'tower_schedule',
+                                  select='start_time,end_time,tower_schedule_id,max_tower_area_id',
+                                  event_producer=produce)
+    # Multi-year records are not evidence of the old, short tower sweep season.
+    # Preserve the source dates, but never schedule that workflow from them.
+    if event and event.endTimestamp-event.startTimestamp > timedelta(days=366).total_seconds():
+        event.extras['schedule_only'] = True
+        event.extras['reason'] = ('当前露娜塔区域没有回廊，跳过回廊扫荡' if not event.extras['cloister_quest_id']
+                                  else '长期静态配置；回廊须独立核对现场状态')
+    return event
 
 def _query_drop_normal_event(conn: sqlite3.Connection):
     def gen_event(result):
@@ -189,7 +227,7 @@ def _build_event_news(cache_path, db_file):
     with closing(sqlite3.connect(os.path.join(cache_path, db_file))) as conn:
         conn.create_function('ISO', 1, _iso_datetime)
         free_gacha = _query_free_gacha_event(conn)
-        hatsune = _query_hatsune_event(conn)
+        hatsune = _query_story_event(conn)
         revival = _query_revival_event(conn)
         tower = _query_tower_event(conn)
         drop_normal = _query_drop_normal_event(conn)

@@ -119,7 +119,7 @@ Task: #配置执行任务,配置任务名称，如果需要传入参数在下面
     -
       - team_battle # 团队战开放期间，体力扫荡后使用已取得的挑战次数
     -
-      - luna_tower_clean # 进行露娜塔的回廊扫荡，通过露娜塔后开放（只在露娜塔开放期间执行）
+      - luna_tower_clean # 检查当前露娜塔区域的回廊定义，无回廊时跳过；普通爬塔使用按需任务luna_tower_climb
     -
       - shop_buy #商店购买
       -
@@ -148,7 +148,7 @@ Dungeon:
   auto_equip: false
   review_on_unexpected: true
 
-# 按需运行 upgrade_all_characters，不加入默认日常
+# 默认日常运行 upgrade_all_characters：全员拉满等级、技能、普通装备和品级
 CharacterUpgrade:
   timeout: 1800
   max_batches: 40

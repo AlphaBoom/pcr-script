@@ -98,6 +98,7 @@ class EventParty:
     assumptions: list[str] = field(default_factory=list)
     auto: bool = True
     damage_reference: dict = field(default_factory=dict)
+    declared_build: dict = field(default_factory=dict)
 
 
 def load_parties(path: str | Path, event_title: str, difficulty: str, mode: int) -> list[EventParty]:

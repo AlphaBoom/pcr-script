@@ -1,4 +1,4 @@
-"""Read-only fallback for characters without a rotating equipment frame."""
+"""Equipment pages: read-only slot checks, plus installing a missing first slot."""
 from __future__ import annotations
 
 import re
@@ -69,10 +69,128 @@ def inspect_unreleased_equipment(ui: EventUI, name: str) -> str | None:
         return None
     ui.expect_click('专用装备', (775, 55, 860, 95), exact=True)
     s = ui.wait(lambda frame: frame.find('此专用装备1预定今后登场[。.]?', (470, 300, 925, 370), exact=True)
-                or frame.find('专用装备1|专用装备2', (470, 110, 925, 440), exact=True), '专用装备页面')
+                or frame.find('专用装备1|专用装备2', (470, 110, 925, 440), exact=True)
+                or (frame.find('角色强化', (40, 0, 250, 65))
+                    and frame.find('装备属性值', (470, 240, 680, 305), exact=True)
+                    and frame.find('装备|强化', (700, 405, 925, 470), exact=True)), '专用装备页面')
     if s.find('此专用装备1预定今后登场[。.]?', (470, 300, 925, 370), exact=True):
         return str(ui.save('equipment_unreleased_'+name, s))
     return None
+
+
+UNIQUE_FRAGMENTS = 50
+
+
+def unique_missing(screen):
+    """A released, uninstalled slot offers obtain and equip; an unreleased one greys them out."""
+    return bool(screen.find('角色强化', (40, 0, 250, 65))
+                and screen.find('获取方法', (490, 405, 700, 470), exact=True)
+                and screen.find('装备', (700, 405, 925, 470), exact=True)
+                and not screen.find(r'此专用装备[12]预定今后登场[。.]?', (470, 300, 925, 370), exact=True))
+
+
+def settle_unique_dialogs(ui, done, description):
+    """Accept only the game's own bottom confirm; any other page stays stopped."""
+    for _ in range(20):
+        screen = ui.capture()
+        if done(screen):
+            return screen
+        button = screen.find('确认|关闭|OK', (250, 400, 720, 525), exact=True)
+        if button:
+            ui.click(button)
+        time.sleep(.5)
+    raise EventUIError(description+'回执未确认，保留现场')
+
+
+def recipe_other_material_ready(screen):
+    """The lit frame marks a sufficient material; its OCR count is unreliable."""
+    hsv = cv.cvtColor(screen.image[304:309, 716:780], cv.COLOR_BGR2HSV)
+    return float(np.mean((hsv[:, :, 0] >= 18) & (hsv[:, :, 0] <= 40)
+                         & (hsv[:, :, 1] > 90) & (hsv[:, :, 2] > 170))) > .2
+
+
+def fill_unique_slot(ui, name, page, record, save, *, buy_fragments=None):
+    """Equip one displayed slot, crafting it first when the item is not held."""
+    button = page.find('装备', (700, 405, 925, 470), exact=True)
+    if not page.blue_button(button):
+        ui.expect_click('获取方法', (490, 405, 700, 470), exact=True)
+        panel = ui.wait(lambda s: s.find('装备获取', (300, 20, 660, 65), exact=True), '专武装备获取')
+        record['recipe'] = str(ui.save('unique_recipe_'+name, panel))
+        craft = panel.find('制作', (690, 445, 920, 510), exact=True)
+        if panel.find('素材不足', (380, 410, 600, 450)) or not panel.blue_button(craft):
+            if buy_fragments is not None and recipe_other_material_ready(panel):
+                return buy_fragments(panel)
+            ui.expect_click('取消', (50, 450, 260, 505), exact=True)
+            record['status'] = 'insufficient_material'
+            save()
+            return record['status']
+        record['status'] = 'crafting'
+        save()
+        ui.click(craft)
+        page = settle_unique_dialogs(ui, lambda s: unique_missing(s)
+            and s.blue_button(s.find('装备', (700, 405, 925, 470), exact=True)), '专武制作')
+        button = page.find('装备', (700, 405, 925, 470), exact=True)
+    record['status'] = 'installing'
+    save()
+    ui.click(button)
+    after = settle_unique_dialogs(ui, lambda s: s.find('角色强化', (40, 0, 250, 65))
+        and s.find('强化', (700, 405, 925, 470), exact=True) and not unique_missing(s), '专武装备')
+    record.update(status='installed', after=str(ui.save('unique_after_'+name, after)))
+    save()
+    return record['status']
+
+
+def install_missing_unique(ui: EventUI, name: str, report: dict, save, home) -> str:
+    """Fill empty slots: slot 1 may buy fragments, slot 2 waits for the user; no orbs."""
+    def open_page():
+        if open_character_memory(ui, name) is None:
+            raise EventUIError('培养页面未确认角色衣装')
+        ui.expect_click('专用装备', (775, 55, 860, 95), exact=True)
+        return ui.wait(lambda s: s.find('角色强化', (40, 0, 250, 65))
+                       and (unique_missing(s) or unique_equipment_fields(s)
+                            or s.find('强化', (700, 405, 925, 470), exact=True)), '专用装备页面')
+    page = open_page()
+    result = 'not_needed'
+    if unique_missing(page):
+        record = dict(character=name, slot=1, status='checking', purchases=[],
+                      before=str(ui.save('unique_before_'+name, page)))
+        report.setdefault('unique_installs', []).append(record)
+        save()
+        def buy_fragments(panel):
+            from .character_stars import buy_from_open_shop
+            # The fragment icon lists its shop; purchase then re-reads the slot.
+            ui.click((647, 345))
+            ui.wait(lambda s: s.find('女神的秘石商店', (560, 190, 900, 235), exact=True), '专武碎片获取方法')
+            ui.click((700, 225))
+            ui.wait(lambda s: s.find('商店', (40, 0, 200, 65), exact=True), '秘石商店')
+            record['status'] = 'buying_fragments'
+            save()
+            buy_from_open_shop(ui, name, None, record, save, total=UNIQUE_FRAGMENTS)
+            home()
+            return None
+        result = fill_unique_slot(ui, name, page, record, save, buy_fragments=buy_fragments)
+        if result is None:
+            page = open_page()
+            result = fill_unique_slot(ui, name, page, record, save) if unique_missing(page) else 'not_needed'
+        if result != 'installed':
+            return result
+        page = ui.capture()
+    selector = second_unique_selector(page)
+    if selector:
+        ui.click(selector)
+        time.sleep(1)
+        second = ui.capture()
+        if unique_missing(second):
+            record = dict(character=name, slot=2, status='checking',
+                          before=str(ui.save('unique2_before_'+name, second)))
+            report.setdefault('unique_installs', []).append(record)
+            save()
+            outcome = fill_unique_slot(ui, name, second, record, save)
+            if outcome == 'insufficient_material':
+                report.setdefault('needs_user', []).append(name+' 专武2素材不足，已放弃，交给用户处理')
+                save()
+            result = 'installed' if 'installed' in (result, outcome) else outcome
+    return result
 
 
 def unique_equipment_fields(screen):
