@@ -83,6 +83,17 @@ def prefer_untried(plans,failures):
     return sorted(plans,key=failed)
 
 
+def prefer_proven(plans,battles):
+    """Teams whose real knife lowered the boss go first; new guides only get what is left of the run."""
+    best={}
+    for battle in battles:
+        before,after=battle.get('before',{}).get('hp',[]),battle.get('after',{}).get('hp',[])
+        if (battle.get('simulate') is False and len(before)==5 and len(after)==5 and after[4]<before[4]):
+            key=frozenset(battle.get('names',[]))
+            best[key]=max(best.get(key,0),before[4]-after[4])
+    return sorted(plans,key=lambda plan:-best.get(frozenset(plan['names']),0))
+
+
 def remembered_trials(winners,phase):
     """Reuse real ordinary-floor winners as free boss trials, not win proofs."""
     if phase not in (2,3):return []

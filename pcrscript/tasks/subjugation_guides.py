@@ -445,7 +445,10 @@ def parties_for_target(report, options, *, allow_local_trials):
                     and a.get('evidence', {}).get('method') == 'video_ocr' for a in actions))
         # A manual axis cannot be replayed, but its roster may still pass a free
         # simulation on fixed settings. Only that account result can permit spending.
-        roster_trial = (allow_local_trials and wanted['kind'] == 'boss' and bool(actions) and not owned_trial)
+        # Unread SET flags are the same case: they default on and the trial decides.
+        roster_trial = (allow_local_trials and wanted['kind'] == 'boss' and not owned_trial
+                        and (bool(actions) or any(type(f.get('value')) is not bool and not f.get('conflicts')
+                                                  for f in flags)))
         if ((raw.get('scope') != wanted and not difficulty_trial) or not raw.get('scope_verified')
                 or raw.get('region') != 'cn' or raw.get('target_region') != 'cn'
                 or raw.get('global_requirements') or actions and not owned_trial and not roster_trial

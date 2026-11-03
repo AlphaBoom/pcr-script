@@ -33,7 +33,14 @@ def validate_options(options):
         integers=(('timeout', 3600, 14400), ('battle_timeout', 240, 600),
                   ('max_floors', 10, 100), ('max_candidates', 20, 100), ('max_pages', 12, 100)),
         flags=(('preview_only', False), ('simulation_only', False), ('auto_equip', False),
-               ('support_trials',True),('prefer_support',False),('tank_trials',True),('free_recovery',True)))
+               ('support_trials',True),('prefer_support',False),('tank_trials',True),('free_recovery',True),
+               ('video_guides',True)))
+    attacks = value.setdefault('top_attacks_per_run', 1)
+    if type(attacks) is not int or not 0 <= attacks <= 100:
+        raise ValueError('LunaTower.top_attacks_per_run必须为0到100的整数；0表示不限制')
+    trials = value.setdefault('top_trials_per_run', 6)
+    if type(trials) is not int or not 0 <= trials <= 100:
+        raise ValueError('LunaTower.top_trials_per_run必须为0到100的整数；0表示不限制')
     target = value.setdefault('target_floor', 0)
     if type(target) is not int or not 0 <= target <= 10000:
         raise ValueError('LunaTower.target_floor必须为0到10000的整数；0表示本期最高层')
@@ -70,6 +77,22 @@ class TowerFormation(StrategyFormation):
                 identity=recognize_icon(screen.image[y:y+h,x:x+w],self.avatars,manifest)
             if identity and normalized(identity)==name:matches.append(rect)
         return matches
+
+    def settled_names(self,frame,manifest,names):
+        """Slot crops can miss a card its search matched; only the picked members can fill the gaps."""
+        order=self.current_names(frame,manifest)
+        gaps=[i for i,name in enumerate(order) if name is None]
+        missing=sorted(set(names)-set(order))
+        if not gaps or len(gaps)!=len(missing) or len(order)!=len(names):return order
+        if len(gaps)==1:
+            order[gaps[0]]=missing[0]
+            return order
+        slots=self.occupied_slots(frame)
+        crops=[face_crop(frame.image,(slots[i][0]-48,self.slot_top,96,96)) for i in gaps]
+        found=self.avatars.assign_expected(crops,missing)
+        if found:
+            for i,name in zip(gaps,found):order[i]=name
+        return order
 
     def select_fast(self,names,manifest,*,support_name=None):
         """Select exact public identities; never open character detail pages."""
@@ -114,7 +137,7 @@ class TowerFormation(StrategyFormation):
         def ready(frame):
             nonlocal order
             if not field.formation(frame):return False
-            order=self.current_names(frame,manifest)
+            order=self.settled_names(frame,manifest,names)
             return len(order)==len(names) and set(order)==set(names)
         if not ready(screen):
             try:screen=self.ui.wait(ready,'塔顶原五人选人回执',timeout=5)
@@ -874,12 +897,20 @@ class LunaTowerClimb(TowerTask):
 
     def climb_top(self, screen):
         """A settled partial defeat can complete a phase of the cumulative boss."""
-        from .tower_guides import load_guides,with_support_trials,with_tank_trials,with_shadow_followups,prefer_untried,remembered_trials,trial_key,phase_progress,PHASE_GOAL_VERSION,IDENTITY_VERSION,PhaseTrace
+        from .tower_guides import load_guides,prefer_proven,with_support_trials,with_tank_trials,with_shadow_followups,prefer_untried,remembered_trials,trial_key,phase_progress,PHASE_GOAL_VERSION,IDENTITY_VERSION,PhaseTrace
         floor=field.floor_number(screen)
         with closing(sqlite3.connect('cache/redive_cn.db')) as conn:
             costs=conn.execute('SELECT stamina,stamina_start FROM tower_quest_data WHERE floor_num=?',(floor,)).fetchall()
         if not costs or any(row!=(0,0) for row in costs):raise EventUIError('塔顶体力消耗未知或非零')
         plans=load_guides(self.options,floor,self.formation.avatars,self.avatar_manifest,check=self.check_deadline)
+        if self.options['video_guides']:
+            from .tower_boards import board_plans
+            self.report_progress('露娜塔 · 解析国服练度表')
+            boards,notes=board_plans(self.options,floor,self.formation.avatars,check=self.check_deadline)
+            self.report['board_sources']=notes
+            # This server's own daily plans come before cross-server articles.
+            plans=boards+plans
+        plans=prefer_proven(plans,self.state.get('phase_battles',[]))
         spent={n for b in self.state.get('phase_battles',[])[self.state.get('role_recovery_battle_count',0):]
                if b.get('result')=='failed'
                for n in b.get('names',[]) if n!=b.get('support')}
@@ -894,7 +925,7 @@ class LunaTowerClimb(TowerTask):
                     talents={normalized(n):t for n,t in conn.execute('SELECT p.unit_name,t.talent_id FROM unit_profile p '
                         'JOIN unit_talent t ON p.unit_id=t.unit_id')}
                 plans=with_tank_trials(plans,roles,talents)
-        tried=set();record_tried={}
+        tried=set();record_tried={};trials=0
         for _ in range(self.options['max_candidates']):
             screen=self.enter()
             if field.selected_cleared(screen):
@@ -930,6 +961,7 @@ class LunaTowerClimb(TowerTask):
                     if real['won']:
                         self.report['status']='complete'
                         return self.report
+                    if self.attack_budget_spent():return self.report
                     continue
             failed=[f for f in self.state.get('failed_phase_parties',[]) if f.get('target')==target
                     and f.get('goal_version')==PHASE_GOAL_VERSION
@@ -963,6 +995,11 @@ class LunaTowerClimb(TowerTask):
                           tried=record_tried.setdefault(str(target),set()),
                           goal='shadows' if phase==1 else 'boss_damage')
             self.report_progress('露娜塔 · 塔顶阶段'+str(phase)+' · 免费模拟')
+            trials+=1
+            if trials>self.options['top_trials_per_run']>0:
+                self.report['status']='partial'
+                self.report['pending'].append(f"塔顶本次已试 {trials-1} 队未通过，按 top_trials_per_run 留待下次接续")
+                return self.report
             try:
                 trial=self.phase_battle(plan,simulate=True)
             except EventUIError as error:
@@ -998,7 +1035,17 @@ class LunaTowerClimb(TowerTask):
             if real['won']:
                 self.report['status']='complete'
                 return self.report
+            if self.attack_budget_spent():return self.report
         raise EventUIError('达到塔顶阶段模拟上限，可从实际生命状态接续')
+
+    def attack_budget_spent(self):
+        """The boss heals back whatever a weak second team leaves; tomorrow's recovery resets the party."""
+        self._top_attacks=getattr(self,'_top_attacks',0)+1
+        limit=self.options['top_attacks_per_run']
+        if not limit or self._top_attacks<limit:return False
+        self.report['status']='partial'
+        self.report['pending'].append(f'塔顶本次已实战 {self._top_attacks} 刀，按 top_attacks_per_run 留待下次接续')
+        return True
 
     def run(self):
         try:

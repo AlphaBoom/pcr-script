@@ -77,6 +77,110 @@ def _universal_row(image,result,index,spacing):
                 pending=['表格未提供完整专武开关/培养要求，按授权的本地培养试验；不是完整攻略复现'])
 
 
+def board_seeds(image):
+    """Rows of equal, adjacent card outlines; edges can merge, so two neighbours are enough."""
+    edges=cv.Canny(cv.cvtColor(image,cv.COLOR_BGR2GRAY),40,100)
+    contours,_=cv.findContours(edges,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE)
+    boxes=sorted({cv.boundingRect(c) for c in contours},key=lambda b:b[1])
+    boxes=[b for b in boxes if 40<=b[2]<=120 and .7*b[2]<=b[3]<=1.4*b[2]]
+    rows=[]
+    for box in boxes:
+        row=next((r for r in rows if abs(r[0][1]-box[1])<=6),None)
+        if row is None:rows.append([box])
+        else:row.append(box)
+    seeds=[]
+    for row in rows:
+        row.sort()
+        # Anchor on each adjacent pair: a stray outline can share the row but not the grid.
+        for a,b in zip(row,row[1:]):
+            if .85*min(a[2],b[2])<=b[0]-a[0]<=1.2*max(a[2],b[2]):
+                # A taller outline includes the cell's frame; the square card sits at its centre.
+                seed=(a[0],a[1]+max(0,a[3]-a[2])//2,b[0]-a[0])
+                if not any(abs(seed[1]-s[1])<=6 and abs(seed[2]-s[2])<=3 and (seed[0]-s[0])%s[2] in range(-4,5) for s in seeds):
+                    seeds.append(seed)
+    return seeds
+
+
+def board_cell(image,x,y,step,index):
+    """The best-aligned identity of one card, or None when its face is not clear.
+
+    Empty cells reach high scores with a margin near .01, so a clear read needs real
+    separation; a weaker score must separate further than a costume sibling would.
+    """
+    sizes=range(round(step*.84),round(step*1.02)+1,2)
+    rects=[(x+dx,y+dy,size,size) for dx in range(-6,7,2) for dy in range(-6,7,2) for size in sizes]
+    rects=[r for r in rects if r[0]>=0 and r[1]>=0 and r[0]+r[2]<=image.shape[1] and r[1]+r[3]<=image.shape[0]]
+    if not rects:return None
+    scores=np.stack([feature(face_crop(image,r)) for r in rects])@index.matrix.T
+    chosen=int(scores.max(axis=1).argmax());row=scores[chosen]
+    ranked={}
+    for i in np.argsort(row)[::-1]:
+        ranked.setdefault(str(index.names[i]),float(row[i]))
+        if len(ranked)==2:break
+    if len(ranked)<2:return None
+    (name,score),(_,second)=ranked.items()
+    if name.startswith('unit:') or score<.85 or score-second<(.03 if score>=.9 else .05):return None
+    return dict(name=name,score=score,margin=score-second,rectangle=list(rects[chosen]))
+
+
+def board_set(texts,row,others):
+    """The team's first standalone five-letter SET; a timed axis has none and stays unread."""
+    left=row['rectangle'][0]+row['rectangle'][2]
+    top=row['rectangle'][1]
+    right=min([o['x'] for o in others if o['x']>=left and abs(o['y']-top)<=row['step']*.5],default=1e9)
+    bottom=min([o['y'] for o in others if o['y']>top+row['step']*.5 and o['x']<left<o['x']+o['step']*6],default=1e9)
+    flags=[t for t in texts if left<=t.center[0]<right and top<=t.center[1]<bottom
+           and re.fullmatch('[OX]{5}',normalized(t.text).upper().replace('0','O').replace('×','X').replace('〇','O'))]
+    if not flags:return None
+    first=min(flags,key=lambda t:t.center[1]).text
+    return [c=='O' for c in normalized(first).upper().replace('0','O').replace('×','X').replace('〇','O')]
+
+
+def board_hint(texts):
+    """Grid search is slow; only frames that read like a board or a SET list are worth it."""
+    return any(re.fullmatch('[OX0○〇×]{5}',normalized(t.text).upper()) or normalized(t.text).upper() in ('RANK','备注','星级','职阶专精')
+               for t in texts)
+
+
+def guide_board_rows(image,texts,index):
+    """Read a static guide board: rows of five portrait cells, each with an optional SET note.
+
+    Small table portraits score below in-game cards, so this only nominates rosters. A free
+    simulation still decides whether they spend anything.
+    """
+    if not index.names:return []
+    found={}
+    seeds=board_seeds(image)
+    # Merged outlines can misjudge one pair's spacing; a board's tables share one grid.
+    attempts={(x0,y,step) for x0,y,own in seeds for step in {s[2] for s in seeds}|{own} if abs(step-own)<=own*.12}
+    # A header can merge the first or last row's outlines; extend a stack by its own row gap.
+    for x0,y,step in seeds:
+        stack=sorted(s[1] for s in seeds if abs(s[0]-x0)<=6 and abs(s[2]-step)<=5)
+        if len(stack)>=2:
+            attempts|={(x0,stack[0]-(stack[1]-stack[0]),step),(x0,stack[-1]+(stack[-1]-stack[-2]),step)}
+    for x0,y,step in sorted(attempts):
+        columns=sorted({x0+k*step for k in range(-8,12) if 0<=x0+k*step<=image.shape[1]-step})
+        run=[]
+        for x in columns+[None]:
+            cell=None if x is None else board_cell(image,x,y,step,index)
+            if cell is not None:
+                run.append(cell);continue
+            names=[c['name'] for c in run]
+            if len(run)==5 and len(set(names))==5:
+                first=run[0]['rectangle']
+                # Neighbouring seeds can read one row twice; the better-aligned reading stays.
+                key=tuple(names)
+                total=sum(c['score'] for c in run)
+                if key not in found or total>found[key]['total']:
+                    found[key]=dict(names=names,members=run,x=first[0],y=first[1],step=step,total=total,
+                        rectangle=[first[0],first[1],run[-1]['rectangle'][0]+run[-1]['rectangle'][2]-first[0],step])
+            run=[]
+    rows=list(found.values())
+    for row in rows:
+        row['instant']=board_set(texts,row,[o for o in rows if o is not row])
+    return sorted(rows,key=lambda r:(r['y'],r['x']))
+
+
 def extract_tables(source,api,*,directory='cache/game/strategies/video_tables'):
     if source.get('provider')!='bilibili':return {'parties':[],'pending':['该来源尚无可用的配队表解析器']}
     bvid=source['bvid'];root=Path(directory)/bvid;root.mkdir(parents=True,exist_ok=True)

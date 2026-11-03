@@ -1805,6 +1805,19 @@ class SubjugationTests(TestCase):
                 with patch.object(formation, 'occupied_slots', return_value=formation.slots):
                     self.assertEqual(formation.portrait_order(wanted), order)
 
+    def test_entry_closes_a_leftover_boss_settlement(self):
+        task = self.task(Game())
+        settlement = synthetic_screen(('首领结算', 480, 42), ('造成的伤害', 320, 90), ('关闭', 478, 479))
+        ready = synthetic_screen(('深渊讨伐战', 120, 30))
+        task.event = EVENT
+        with patch.object(task, 'capture', side_effect=[settlement, ready]), \
+             patch.object(task, 'click') as click, \
+             patch.object(task, 'wait', return_value=ready), \
+             patch.object(task, 'verify_home', return_value='home'), \
+             patch('pcrscript.tasks.task_abyss_subjugation.field.home', side_effect=lambda s: s is ready):
+            self.assertEqual(task.enter(), 'home')
+        self.assertEqual(click.call_args.args[1], '关闭')
+
     def test_detail_attempts_accept_the_observed_score_but_not_a_weak_read(self):
         page = synthetic_screen(('2/4', 555, 459))
         page.find(r'\d+/\d+', (495, 440, 580, 480), exact=True).score = .927

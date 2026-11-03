@@ -24,7 +24,7 @@ from .strategy_document import Evidence, Fact, empty_member, finalize, export_do
 from .strategy_sources import BORROW_PART, MANUAL_PART, UNVERIFIED_SETTING, discover_sources, get_source_rules, timed_switch_requirement, unparsed_switch_requirement
 from .strategy_inputs import advisory_requirement, declared_region, preferred_sources, source_statements, video_metadata
 
-PARSER_VERSION = 148
+PARSER_VERSION = 151
 FRAME_OCR_VERSION = 1
 COMBAT_AUDIT_SECONDS = 20
 RECOLLECTION_UNSUPPORTED = re.compile(
@@ -875,7 +875,8 @@ def text_constraints(texts, proof: Evidence, *, unparsed_settings=False,
                                                           'rectangle': list(t.rectangle), 'confidence': t.score})))
         unsupported = (RECOLLECTION_UNSUPPORTED.search(t.text) if unsupported_builds else re.search(
             r'属性等级|属性技能|公主骑士|(?<![A-Za-z0-9_.])MP\d+(?![A-Za-z0-9_])|突破', t.text, re.I))
-        if (unsupported and t.text not in ('特别装备设定', '可变更队伍角色的特别装备。')
+        # The formation panel's own labels; OCR can drop the subtitle's full stop.
+        if (unsupported and t.text not in ('特别装备设定', '可变更队伍角色的特别装备。', '可变更队伍角色的特别装备')
                 and not (stadium and stadium_equipment_chrome(texts,t))):
             row['advisory'] = advisory_requirement(t.text)
             global_requirements.append(row)
@@ -920,11 +921,12 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
     if options['task_type'] in ('subjugation', 'collaboration'):
         if source.get('comment_pending') or source.get('comment_complete') is False:
             raise ValueError('作者评论补充未读取完成：'+str(source.get('comment_pending') or '仅取得部分评论'))
+        # A boss's free simulation can still judge the roster; anything else needs the image read.
         for comment in source.get('author_comments', []):
-            if comment.get('images'):
+            if comment.get('images') and not options.get('roster_trials'):
                 raise ValueError(f'作者评论{comment.get("reply_id")}含未解析图片，不能确认攻略要求完整')
     from rapidocr import RapidOCR
-    from .strategy_tables import universal_row
+    from .strategy_tables import board_hint, guide_board_rows, universal_row
     from ..game_ui.screen import normalized
     api = api or BilibiliApi(timeout=options.get('request_timeout', 20), browser_session=True)
     root = Path(options.get('parsed_dir', 'cache/game/strategies/parsed'))/source['bvid']
@@ -1014,6 +1016,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
     # Roster trials still read a manual source's frames, never an unsupported build's.
     roster_trials = options.get('roster_trials')
     blocked_source = bool(unsupported_source if roster_trials else source_setting or unsupported_source)
+    board_cids = set()
     for page in pages:
         check()
         page_name = page.get('part', page.get('title', ''))
@@ -1088,6 +1091,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
         last_combat_box = float('-inf')
         last_caption = frozenset()
         confirmation_rows = set()
+        board_reads = {}
         stadium_detail_rows = set()
         stadium_combat_probes = set()
         # A formation page can recalibrate a recording whose game viewport
@@ -1360,6 +1364,34 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
                         found = [dict(name=name, rectangle=[], score=proofs[0][1]) for name, proofs in zip(row['names'], row['confidence'])]
                         scope = dict(element=row['element'], chapters=row.get('chapters'))
                         verified = bool(scope['chapters'])
+                if (not found and options.get('roster_trials') and verified and not wide_crop
+                        and not combat_scene and board_hint(texts)):
+                    # A static board lists several teams per frame. Its cells nominate
+                    # rosters only; the account's free simulation still decides.
+                    # Corner animations defeat the static-frame digest, so its SET text
+                    # decides whether this board has had enough frames for every row to repeat.
+                    board_key = frozenset(normalized(t.text) for t in texts if board_hint([t]))
+                    board_reads[board_key] = board_reads.get(board_key, 0)+1
+                    if board_reads[board_key] > 4:
+                        continue
+                    if board_reads[board_key] == 4:
+                        position = seconds_list.index(seconds)+1
+                        seconds_list[position:] = seconds_list[position::6]
+                    for board in guide_board_rows(frame, texts, index):
+                        board_cids.add(page['cid'])
+                        key = json.dumps([scope, board['names']], ensure_ascii=False, sort_keys=True)
+                        team = teams.setdefault(key, dict(task_type=options['task_type'], source=source['url'], scope=scope,
+                            scope_verified=verified, members=[empty_member(name) for name in board['names']], frames=[],
+                            observations=defaultdict(list), identity_evidence=[], auto=Fact(), auto_observations=[],
+                            notes=text_source, excluded_stages=[], global_requirements=[], manual_actions=[]))
+                        team['frames'].append(asdict(proof))
+                        for position, (member, cell) in enumerate(zip(team['members'], board['members'])):
+                            evidence = Evidence(**{**asdict(proof), 'rectangle': cell['rectangle'],
+                                                   'method': 'avatar_feature_board', 'confidence': cell['score']})
+                            team['identity_evidence'].append(dict(name=member['name'], **asdict(evidence)))
+                            if board['instant'] is not None:
+                                team['observations'][member['name']].append(('instant', board['instant'][position], evidence))
+                    continue
                 if not found:
                     continue
                 if verified and (options.get('observed_target') or options['task_type'] == 'stadium'):
@@ -1482,7 +1514,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
             continue
         if len({(p['cid'], p['seconds']) for p in team['frames']}) < 2:
             continue
-        if any(not any(row['name'] == member['name'] and row['confidence'] >= .92
+        if any(not any(row['name'] == member['name'] and (row['confidence'] >= .92 or row['method'] == 'avatar_feature_board')
                        for row in team['identity_evidence']) for member in team['members']):
             continue
         if options['task_type'] == 'subjugation':
@@ -1579,6 +1611,9 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
             def applicable(row):
                 evidence = row.get('evidence', {})
                 action_boss = row.get('scope', {}).get('boss')
+                # A board's level and Rank columns record the author's account, not a requirement.
+                if evidence.get('cid') in board_cids and evidence.get('method') != 'unread_requirements':
+                    return False
                 return ((not action_boss or action_boss == team['scope'].get('boss'))
                         and (evidence.get('cid') is None or evidence.get('cid') in cids
                              or evidence.get('method') in ('source_title', 'source_description', 'source_requirements')))
@@ -1592,6 +1627,8 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
         team['manual_actions'] = list({r['text']: r for r in relevant_manual}.values())
         if options['task_type'] == 'collaboration' and (errors or any(p.get('skipped') or p.get('truncated') for p in pages_report)):
             team['manual_actions'].append(dict(text='来源未完整解析，不能确认全部要求'))
+        if any(comment.get('images') for comment in source.get('author_comments', [])):
+            team['manual_actions'].append(dict(text='作者评论含未解析图片，不能确认攻略要求完整'))
         parties.append(finalize(team))
     for party in list(parties):
         if not party.get('scope_verified'):

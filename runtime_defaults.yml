@@ -20,6 +20,9 @@ LunaTower:
   simulation_only: false
   auto_equip: false
   free_recovery: true
+  video_guides: true
+  top_attacks_per_run: 1
+  top_trials_per_run: 6
 StoryEvent:
   source_urls: []
   discover_sources: true

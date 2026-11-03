@@ -198,6 +198,11 @@ class AbyssSubjugation(TimeLimitTask):
                 self.ui.click(cancel)
                 self.wait(lambda frame: not frame.find('BOSS详情|前哨关卡', (45, 25, 195, 85), exact=True),
                           '关闭关卡详情', timeout=10)
+            elif s.find('首领结算', (300, 15, 660, 70), exact=True):
+                # Only reports a settled attack, whoever made it; the live boss page is read next.
+                self.click(s, '关闭', (360, 445, 620, 515))
+                self.wait(lambda frame: not frame.find('首领结算', (300, 15, 660, 70), exact=True),
+                          '关闭首领结算', timeout=10)
             elif field.sweep_receipt(s) or field.result_button(s):
                 button = field.result_button(s) or s.find('关闭|确认|下一步', (250, 330, 945, 525), exact=True)
                 if button is None:

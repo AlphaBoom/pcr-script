@@ -292,6 +292,41 @@ class SubjugationGuideTests(TestCase):
                     parse_video_source(source, source_options({}, EVENT), Mock(), api=Mock(), ocr=Mock())
                 cache.assert_not_called()
 
+    def test_author_answers_to_viewers_are_not_guide_requirements(self):
+        from pcrscript.tasks.strategy_inputs import source_statements
+        source = dict(title='', author_comments=[dict(reply_id=1, root=0, text='作者自己的声明'),
+            dict(reply_id=2, root=1, text='作者接着补充'),
+            dict(reply_id=3, root=99, text='检查下专二和专一吧还有突破'),
+            dict(reply_id=4, root=1, text='回复 @观众 : 应该要手动开一下技能'),
+            dict(reply_id=5, text='旧缓存没有楼层信息')])
+        kept = [text for text, origin in source_statements(source) if origin.startswith('author_comment')]
+        self.assertEqual(kept, ['作者自己的声明', '作者接着补充', '旧缓存没有楼层信息'])
+
+    def test_unread_set_flags_make_a_boss_roster_trial_defaulting_on(self):
+        report = trial_report()
+        raw = report['parties'][0]
+        for member in raw['members'][1:]:
+            member['instant'] = dict(value=None, evidence=[], conflicts=[])
+        allowed = source_options(dict(allow_local_trials=True), EVENT, kind='boss', boss=raw['scope'].get('boss', ''), difficulty=raw['scope'].get('difficulty', '高难'))
+        parties = parties_for_target(report, allowed, allow_local_trials=True)
+        if raw['scope'].get('kind') == 'boss':
+            self.assertEqual(parties[0].build_basis, 'roster_trial')
+            self.assertEqual({m.instant for m in parties[0].members[1:]}, {True})
+        self.assertEqual(parties_for_target(report, allowed, allow_local_trials=False), [])
+
+    def test_boss_roster_trial_reads_past_author_images_but_outposts_do_not(self):
+        source = dict(bvid='BV1234567890', url='https://example.com/synthetic', pages=[],
+            comment_complete=True, author_comments=[dict(reply_id=12, text='',
+                images=['https://example.com/synthetic.png'])])
+        allowed = dict(allow_local_trials=True)
+        for kind, passes in (('boss', True), ('outpost', False)):
+            with self.subTest(kind=kind):
+                options = source_options(allowed, EVENT, kind=kind, boss='合成首领' if kind == 'boss' else '')
+                self.assertEqual(options['roster_trials'], passes)
+                if not passes:
+                    with self.assertRaisesRegex(ValueError, '作者评论12.*图片'):
+                        parse_video_source(source, options, Mock(), api=Mock(), ocr=Mock())
+
     def test_author_images_block_searched_and_supplied_sources(self):
         for supplied in (False, True):
             with self.subTest(supplied=supplied), TemporaryDirectory() as folder:
@@ -573,7 +608,9 @@ class SubjugationGuideTests(TestCase):
                 report, options = self.parse_notes(folder, '前言', 'boss', '说明正文', boss_number=2,
                     metadata=dict(description=statement), set_values=(True, visible, True, True, True))
                 parties = parties_for_target(report, options, allow_local_trials=True)
-                self.assertEqual(len(parties), eligible)
+                # A statement that does not bind leaves the SET unread: only an all-on trial remains.
+                bound = [p for p in parties if p.build_basis != 'roster_trial']
+                self.assertEqual(len(bound), eligible)
                 if eligible:
                     self.assertEqual([m.instant for m in parties[0].members], [True, False, True, True, True])
                     proof = report['parties'][0]['members'][1]['instant']['evidence'][0]
