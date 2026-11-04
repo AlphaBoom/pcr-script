@@ -36,6 +36,42 @@ def complete_party():
 
 
 class VideoStrategyTests(TestCase):
+    def test_event_records_continuous_phase_without_relabeling_start(self):
+        with TemporaryDirectory() as folder:
+            members = [dict(name=f'角色{i}',rectangle=[100+120*i,405,96,96],score=.99) for i in range(5)]
+            source = dict(bvid='BVSYNTHETIC',url='https://example.com/guide',title='国服合成活动SP',
+                          pages=[dict(cid=1,part='SP',duration=4)])
+            index = SimpleNamespace(names=[m['name'] for m in members],matrix=np.ones((5,1728),np.float32))
+            capture = Mock()
+            capture.read.side_effect = [(True,np.full((720,1280,3),v,np.uint8)) for v in (40,80,120)]
+            with patch('pcrscript.tasks.strategy_video.cv.VideoCapture',return_value=capture), \
+                 patch('pcrscript.tasks.strategy_video.sample_seconds',return_value=[1,2,3]), \
+                 patch('pcrscript.tasks.strategy_video.frame_texts',side_effect=[
+                     [GuideText('阶段1',1,(390,10,60,25))], [GuideText('阶段2',1,(390,10,60,25))],
+                     [GuideText('阶段2',1,(390,10,60,25))]]), \
+                 patch('pcrscript.tasks.strategy_video.battle_rectangles',return_value=[m['rectangle'] for m in members]), \
+                 patch('pcrscript.tasks.strategy_video.combat_team',return_value=members), \
+                 patch('pcrscript.tasks.strategy_video.formation_fields',return_value=[]), \
+                 patch('pcrscript.tasks.strategy_video.combat_button_texts',return_value=([],[])), \
+                 patch('pcrscript.tasks.strategy_video.combat_set',return_value=True), \
+                 patch('pcrscript.tasks.strategy_video.combat_auto',return_value=True):
+                report = parse_video_source(source,dict(task_type='event',area='合成活动',difficulty='special',
+                    mode=2,parsed_dir=folder),index,api=Mock(),ocr=Mock(),
+                    media_fetcher=lambda *a,**k:(Path(folder)/'synthetic.avi',dict(duration=4)))
+            self.assertEqual([p['scope']['mode'] for p in report['parties']],[1])
+            self.assertEqual(event_trial_parties(report,'合成活动','special',2,require_settings=True),[])
+            trials = event_trial_parties(report,'合成活动','special',2,require_settings=True,allow_phase_continuation=True)
+            self.assertEqual(len(trials),1)
+            self.assertIn('起始TP',trials[0].assumptions[-1])
+            self.assertEqual(trials[0].max_attempts,3)
+            party = report['parties'][0]
+            for field,value in [('phase_coverage',party['phase_coverage'][:2]), ('region','unknown'),
+                                ('manual_actions',[{'text':'手动操作'}]), ('global_requirements',[{'text':'未知要求'}])]:
+                rejected = dict(party,**{field:value})
+                self.assertEqual(event_trial_parties(dict(parties=[rejected]),'合成活动','special',2,
+                    allow_phase_continuation=True),[])
+            self.assertEqual(event_trial_parties(report,'合成活动','special_plus',2,allow_phase_continuation=True),[])
+
     def test_stadium_letterbox_projects_ocr_into_active_view(self):
         text = GuideText('合成标记',1,(719,522,102,115))
         projected = texts_in_view([text],1280,128,1024,
@@ -199,6 +235,8 @@ class VideoStrategyTests(TestCase):
         for character in ('爆', '螺', '煤'):
             self.assertEqual(text_constraints([GuideText(label.replace('爆', character), .99, (1080, 70, 180, 20))],
                              proof, unparsed_settings=True), ([], []))
+        self.assertEqual(text_constraints([GuideText('连热爆发立即发动开启', .99, (1100, 68, 105, 23))],
+                         proof, unparsed_settings=True), ([], []))
         for text, rectangle in ((label, (10, 170, 200, 20)),
                                 (label.replace('爆', '煤'), (10, 170, 200, 20)),
                                 ('连结爆发立即发动关闭', (1080, 70, 180, 20)),
@@ -309,6 +347,24 @@ class VideoStrategyTests(TestCase):
         self.assertTrue(verified)
         self.assertEqual(scope,dict(difficulty='special',mode=1))
 
+    def test_event_skips_explicit_noncombat_parts_but_keeps_notes(self):
+        pages = [dict(cid=1, part='sp'), dict(cid=2, part='sp+'),
+                 dict(cid=3, part='抽大蜘蛛'), dict(cid=4, part='第6话 后续'),
+                 dict(cid=5, part='前言'), dict(cid=6, part='抽卡角色培养要求'),
+                 dict(cid=7, part='抽卡阵容SP打法说明')]
+        selected = choose_pages(dict(title='合成活动', pages=pages),
+            dict(task_type='event', difficulty='special', mode=1, max_pages_per_video=8))
+        self.assertEqual({p['cid'] for p in selected}, {1,5,6,7})
+        source = dict(title='合成活动SP/EX', pages=[dict(cid=1,part='SP auto作业'),
+            dict(cid=2,part='EX auto作业'),dict(cid=3,part='SC 固定支援'),
+            dict(cid=4,part='EX培养要求'),dict(cid=5,part='EXTRA说明')])
+        selected = choose_pages(source, dict(task_type='event',difficulty='special',mode=1,max_pages_per_video=8))
+        self.assertEqual({p['cid'] for p in selected}, {1,4,5})
+        plus = dict(title='合成活动SP+/EX',pages=[dict(cid=1,part='SP+ auto作业'),
+            dict(cid=2,part='EX auto作业'),dict(cid=3,part='SC 固定支援')])
+        self.assertEqual([p['cid'] for p in choose_pages(plus,
+            dict(task_type='event',difficulty='special_plus',mode=1,max_pages_per_video=8))],[1])
+
     def test_guild_advert_does_not_override_video_server(self):
         from pcrscript.tasks.strategy_video import declared_region
         self.assertEqual(declared_region('日服公会招募 国服公会招募'), 'unknown')
@@ -400,6 +456,25 @@ class VideoStrategyTests(TestCase):
                 cv.rectangle(image,(x+70,380),(x+116,410),cyan,-1)
         self.assertEqual(len(battle_rectangles(image)),5)
         cv.rectangle(image,(662,376),(785,495),(0,0,0),-1)
+        self.assertEqual(battle_rectangles(image),[])
+
+    def test_combat_bottom_stripes_recover_several_merged_card_bodies(self):
+        image=np.full((540,960,3),245,np.uint8)
+        cyan=(255,200,0)
+        for i in range(5):
+            x,y=194+120*i,394
+            cv.rectangle(image,(x,y),(x+94,y+94),cyan,5)
+            cv.circle(image,(x+96,y-1),15,cyan,-1)
+            if i<4:
+                image[y+30:y+36,x+88:x+100]=245
+        boxes=battle_rectangles(image)
+        self.assertEqual(len(boxes),5)
+        self.assertTrue(all(abs(x+w/2-(241+120*i))<8 for i,(x,y,w,h) in enumerate(boxes)))
+        bars=np.full_like(image,245)
+        for i in range(5):
+            cv.rectangle(bars,(194+120*i,483),(288+120*i,489),cyan,-1)
+        self.assertEqual(battle_rectangles(bars),[])
+        image[370:495,550:670]=245
         self.assertEqual(battle_rectangles(image),[])
 
     def test_vertical_combat_card_borders_are_recognized(self):
@@ -686,6 +761,23 @@ class VideoStrategyTests(TestCase):
                                         source['pages'][1],'abyss'),({},False))
 
     def test_event_scope_rejects_other_modes_and_incomplete_build(self):
+        collection = dict(cid=99, part='国服合成活动 SP&SP+&EX一队通用作业')
+        self.assertEqual(choose_pages(dict(title=collection['part'], pages=[collection]),
+            dict(task_type='event', area='合成活动', difficulty='special', mode=1)), [collection])
+        self.assertEqual(observed_scope([], collection, 'event'), ({}, False))
+        parts = [dict(cid=1, part='【SC】固定支援'), dict(cid=2, part='【SP】一刀'), dict(cid=3, part='【EX】两刀')]
+        self.assertEqual(choose_pages(dict(title='合成活动', pages=parts),
+            dict(task_type='event', area='合成活动', difficulty='special', mode=1)), [parts[1]])
+        aliases = ['合成主标题', '合成副标题W']
+        queried = task_source_options('event', dict(sources=dict(aliases=aliases)),
+            area='合成主标题合成副标题W', difficulty='special', mode=1)
+        self.assertEqual(queried['aliases'], aliases)
+        self.assertEqual(queried['area'], '合成主标题合成副标题W')
+        self.assertTrue(queried['skip_manual_media'])
+        self.assertTrue(queried['skip_long_media'])
+        self.assertEqual(queried['minimum_media_quality'], 64)
+        from pcrscript.tasks.strategy_sources import source_queries
+        self.assertIn('SP 作业', source_queries([queried['area']], '', 'normal', kind='event')[0])
         options = task_source_options('revival', {'source_urls': []},
             area='合成活动', difficulty='special', mode=2)
         self.assertEqual((options['area'], options['difficulty'], options['mode']),
@@ -734,7 +826,56 @@ class VideoStrategyTests(TestCase):
             self.assertEqual(found[1].build_basis, 'local_trial')
             self.assertIsNotNone(report)
             acquire.assert_called_once()
+            accept = acquire.call_args.kwargs['accept']
+            self.assertTrue(accept(dict(parties=[party])))
+            self.assertFalse(accept(dict(parties=[])))
             local.assert_called_once()
+
+    def test_boss_pool_merges_configured_and_current_run_exclusions(self):
+        with patch('pcrscript.tasks.strategy_party_pool.acquire_strategies', return_value=dict(parties=[])) as acquire:
+            boss_parties(dict(sources=dict(exclude_sources=['https://example.com/failed'])),
+                kind='event', area='合成活动', difficulty='special', mode=1,
+                default_path='unused.yml', exclude_sources=['https://example.com/current'])
+        self.assertEqual(acquire.call_args.kwargs['exclude_sources'],
+            frozenset(['https://example.com/failed', 'https://example.com/current']))
+        for invalid in ('https://example.com/failed', [None], ['']):
+            with self.assertRaises(ValueError):
+                boss_parties(dict(sources=dict(exclude_sources=invalid)), kind='event',
+                    area='合成活动', difficulty='special', mode=1, default_path='unused.yml')
+
+    def test_event_trial_retains_known_build_and_rejects_conflicting_facts(self):
+        from pcrscript.tasks.strategy_trial import declared_trial_issues
+        party=complete_party()
+        party['scope']=dict(area='合成活动',difficulty='special_plus',mode=1)
+        party['members'][0]['unique']['value']=None
+        trials=event_trial_parties(dict(parties=[party]),'合成活动','special_plus',1)
+        self.assertEqual(trials[0].declared_build['角色0']['stars'],5)
+        self.assertNotIn('unique',trials[0].declared_build['角色0'])
+        actual=CharacterStatus('角色0',level=100,rank=10,stars=5,skill_level=100,
+                               unique=None,unique2=False,identity_verified=True)
+        self.assertEqual(declared_trial_issues(trials[0].declared_build['角色0'],actual),[])
+        actual.stars=6
+        self.assertTrue(declared_trial_issues(trials[0].declared_build['角色0'],actual))
+        self.assertEqual(declared_trial_issues(dict(unique=True),actual,defer_unknown_equipment=True),[])
+        self.assertTrue(declared_trial_issues(dict(unique=True),actual))
+        party['members'][0]['rank']['conflicts']=[dict(value=11)]
+        self.assertEqual(event_trial_parties(dict(parties=[party]),'合成活动','special_plus',1),[])
+
+    def test_limited_continuation_requires_separate_opt_in_and_same_difficulty(self):
+        party=complete_party()
+        party['scope']=dict(area='合成活动',difficulty='special_plus',mode=1)
+        party['phase_coverage']=[dict(mode=3,evidence=dict(source=party['source'],cid=1,seconds=t,
+            confidence=.99,method='combat_phase')) for t in (30,31)]
+        report=dict(parties=[party])
+        self.assertEqual(event_trial_parties(report,'合成活动','special_plus',3,allow_phase_continuation=True),[])
+        trials=event_trial_parties(report,'合成活动','special_plus',3,allow_limited_phase_continuation=True)
+        self.assertEqual(len(trials),1)
+        self.assertEqual(trials[0].max_attempts,3)
+        self.assertIn('起始TP',trials[0].assumptions[-1])
+        self.assertEqual(event_trial_parties(report,'合成活动','special',3,allow_limited_phase_continuation=True),[])
+        self.assertEqual(event_trial_parties(report,'合成活动','special_plus',2,allow_limited_phase_continuation=True),[])
+        party['manual_actions']=[dict(text='手动开关')]
+        self.assertEqual(event_trial_parties(report,'合成活动','special_plus',3,allow_limited_phase_continuation=True),[])
 
     def test_trial_pool_adds_role_substitution_without_claiming_ownership(self):
         party = complete_party()
@@ -1301,8 +1442,10 @@ class VideoStrategyTests(TestCase):
                        for i in range(5)]
             texts = [GuideText('角色'+str(i)+':5星Lv100Rank10技能100专武1有专武2无SET开',
                                1,(0,0,100,20)) for i in range(5)]
+            texts += [GuideText('队伍编组', 1, (450, 20, 200, 40)),
+                      GuideText('战斗开始', 1, (1050, 600, 140, 40))]
             source = dict(bvid='BV0000000000', url='https://example.com/synthetic',
-                title='公主连结 国服 合成活动', pages=[dict(cid=1,part='特别战斗 模式2',duration=5)])
+                title='公主连结 合成 活动', pages=[dict(cid=1,part='特别战斗 模式2',duration=5)])
             index = SimpleNamespace(names=[m['name'] for m in members], matrix=np.ones((5,1728),np.float32))
             with patch('pcrscript.tasks.strategy_video.read_text',return_value=texts), \
                  patch('pcrscript.tasks.strategy_video.combat_team',return_value=members), \

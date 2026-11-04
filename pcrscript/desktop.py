@@ -38,14 +38,15 @@ LABELS = {
     'research': '圣迹 / 神殿调查', 'schedule': '日程表', 'shop_buy': '商店购买',
     'quick_clean': '快捷扫荡', 'adventure_daily': '冒险日常', 'common_adventure': '普通冒险',
     'clear_story': '阅读剧情', 'get_quest_reward': '首页任务 · 领取任务奖励',
-    'luna_tower_clean': '露娜塔扫荡',
+    'luna_tower_clean': '露娜塔 · 回廊日常检查',
+    'luna_tower_climb': '露娜塔 · 普通楼层推进',
     'team_battle': '团队战',
     'battle_stadium': '斗技场 · 本期满星与领奖',
     'clear_campaign_first_time': '剧情活动首通',
 }
 SPECIAL_TASKS = {'clear_story', 'dungeon_first_clear', 'abyss_push',
-                 'upgrade_all_characters', 'max_character_bonds', 'common_adventure', 'caravan', 'tohomepage',
-                 'dawn_labyrinth_first_clear', 'recollection_first_clear', 'battle_stadium'}
+                 'max_character_bonds', 'common_adventure', 'caravan', 'tohomepage',
+                 'dawn_labyrinth_first_clear', 'recollection_first_clear', 'battle_stadium', 'luna_tower_climb'}
 
 PARAMETER_LABELS = {
     'multi': '抽取所有可用免费十连', 'exclude_stamina': '暂不领取体力',
@@ -83,7 +84,8 @@ DESCRIPTIONS = {
     'common_adventure': '在当前冒险地图根据角色模板定位关卡并循环战斗。需事先进入对应地图；这是持续推进任务，需要手动停止，不适合无条件加入日常。',
     'clear_story': '处理剧情页面的可读剧情和跳过流程。任务依赖已有图片模板识别。',
     'get_quest_reward': '依次检查首页任务页面的每日、普通、称号标签并领取已完成任务奖励（含体力）。示例日常先领体力供扫荡使用，最后再补领新完成任务的奖励。',
-    'luna_tower_clean': '在露娜塔开放且已完成对应进度时扫荡回廊。配置列表会根据活动情报筛选。',
+    'luna_tower_clean': '按当前露娜塔区域检查回廊定义；改版后无回廊时明确跳过，不执行旧坐标扫荡。',
+    'luna_tower_climb': '从冒险→特别关卡进入露娜之塔，使用当前楼层游戏通关队伍，核对五人身份、培养及装备后先模拟，模拟获胜才实战。按LunaTower配置的目标层、楼层及候选预算推进，不培养、重置或回复角色；特别挑战不在普通爬塔范围。',
     'team_battle': '团队战开放期间，在扫荡后使用现有挑战次数。优先选择满血且可连续击杀的首领；高级推荐队伍必须五人齐全并装备特别装备，每次实战前先通过模拟战。不会购买体力或重置次数。',
     'clear_campaign_first_time': '核对保存队伍并按 StoryEvent.max_first_clear_stamina 上限自动推进普通、困难关卡，随后扫荡和领奖。需允许 allow_local_trials；首领由 bosses 独立控制。',
 }

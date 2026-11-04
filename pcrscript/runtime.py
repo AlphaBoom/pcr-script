@@ -193,7 +193,7 @@ def run_script(config: dict[str, Any], use_adb: bool = False) -> dict[str, Any]:
     # Keep the legacy argument for callers; the configured transport selects the driver.
     emit('progress', scope='action', label='读取本地任务前置信息', unit='task')
     news = fetch_event_news()
-    print("当前进行的活动:")
+    print("活动日程（国服 UTC+8；长期配置不代表已开放）:")
     for value in news.__dict__.values():
         if isinstance(value, Event):
             print(value)

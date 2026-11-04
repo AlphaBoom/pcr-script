@@ -112,6 +112,13 @@ class SpecialEquipmentTests(TestCase):
                 auto_equip_special(ui, ['合成角色'+str(i) for i in range(5)])
         self.assertEqual(state['page'], 'formation')
         self.assertEqual([c.args[0] for c in ui.expect_click.call_args_list], ['自动装备', '确认', '取消'])
+        ui.expect_click.reset_mock()
+        with patch('pcrscript.game_ui.special_equipment.preview_slots', return_value=selected):
+            result=auto_equip_special(ui,['合成角色'+str(i) for i in range(5)],verify_slots=False)
+        self.assertFalse(result['applied'])
+        self.assertFalse(result['actual_verified'])
+        self.assertEqual(state['page'],'formation')
+        self.assertEqual([c.args[0] for c in ui.expect_click.call_args_list],['自动装备','确认','取消'])
 
     def test_dimmed_borrowed_item_is_resolved_against_empty_slot(self):
         before=np.full((540,960,3),100,np.uint8)

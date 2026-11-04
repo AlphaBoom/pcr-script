@@ -79,7 +79,8 @@ def _transfer(url, headers, temporary, timeout, max_bytes, http=requests, check=
 def _transfer_worker(connection, url, headers, temporary, timeout, max_bytes):
     """A media-only worker: never imports configuration or controls a device."""
     try:
-        connection.send(dict(size=_transfer(url, headers, temporary, timeout, max_bytes)))
+        with requests.Session() as client:
+            connection.send(dict(size=_transfer(url, headers, temporary, timeout, max_bytes,http=client)))
     except Exception as error:
         # Signed playback URLs must not escape into logs or tracebacks.
         connection.send(dict(error='ValueError:'+str(error) if type(error) is ValueError
@@ -141,11 +142,28 @@ def video_info(path: Path) -> dict:
 
 def fetch_video(api, bvid: str, page: dict, directory: Path, *, http=requests,
                 timeout: float = 20, max_bytes: int = 250*1024**2,
-                max_seconds: float = 180, check=lambda: None, refresh=False, preferred_quality=64) -> tuple[Path, dict]:
+                max_seconds: float = 180, check=lambda: None, refresh=False, preferred_quality=64,
+                minimum_quality=16) -> tuple[Path, dict]:
     if type(refresh) is not bool:
         raise ValueError('refresh必须为布尔值')
     if type(preferred_quality) is not int or preferred_quality not in (16, 32, 64):
         raise ValueError('preferred_quality必须为16、32或64')
+    if type(minimum_quality) is not int or minimum_quality not in (16, 32, 64) or minimum_quality > preferred_quality:
+        raise ValueError('minimum_quality必须为不高于preferred_quality的16、32或64')
+    minimum_height = {16: 0, 32: 480, 64: 720}[minimum_quality]
+    minimum_long = {16: 0, 32: 854, 64: 1280}[minimum_quality]
+    dimensions = page.get('dimension') or {}
+    source_edges = sorted((dimensions.get('width', 0), dimensions.get('height', 0)))
+    if all(type(edge) in (int, float) and edge > 0 for edge in source_edges):
+        minimum_height = min(minimum_height, int(minimum_long*source_edges[0]/source_edges[1]))
+    def enough_resolution(info):
+        if minimum_quality == 16:
+            return True
+        short, long = sorted((info.get('width', 0), info.get('height', 0)))
+        # Bilibili limits the long edge for wide recordings. A 1280x590
+        # 720p stream is valid for an original 2344x1080 recording, while a
+        # 640x295 downgrade is not. Rotation does not change these bounds.
+        return short >= minimum_height-2 and long >= minimum_long-2
     directory = Path(directory)/bvid
     directory.mkdir(parents=True, exist_ok=True)
     cid = int(page['cid'])
@@ -154,7 +172,7 @@ def fetch_video(api, bvid: str, page: dict, directory: Path, *, http=requests,
     if path.exists() and not refresh:
         try:
             info = video_info(path)
-            if expected <= 0 or abs(info['duration']-expected) < max(3, expected*.03):
+            if enough_resolution(info) and (expected <= 0 or abs(info['duration']-expected) < max(3, expected*.03)):
                 return path, dict(info, cache_hit=True)
         except ValueError:
             pass
@@ -168,6 +186,10 @@ def fetch_video(api, bvid: str, page: dict, directory: Path, *, http=requests,
     # endpoint. It shares the original deadline, retaining a healthy stream.
     qualities = ((64, .25), (32, .5), (16, 1), (16, 1)) if preferred_quality == 64 else (
         ((32, .5), (16, 1), (16, 1)) if preferred_quality == 32 else ((16, 1), (16, 1)))
+    if minimum_quality > 16:
+        # Required text detail must not be traded away at an intermediate
+        # quality deadline. All endpoints still share the total time bound.
+        qualities = tuple((q, 1) for q in (preferred_quality, minimum_quality, minimum_quality))
     for requested_quality, fraction in qualities:
         check()
         if time.monotonic()-started >= max_seconds:
@@ -177,6 +199,9 @@ def fetch_video(api, bvid: str, page: dict, directory: Path, *, http=requests,
         media = data.get('durl', [])
         if play.get('code') != 0 or len(media) != 1:
             errors.append('公开播放信息不可用或视频分段格式暂不支持')
+            continue
+        if minimum_quality > 16 and (type(data.get('quality')) is not int or data['quality'] < minimum_quality):
+            errors.append('公开媒体清晰度低于要求')
             continue
         # Reserve part of the bounded download window for a smaller stream
         # when every high-quality CDN endpoint fails mid-transfer.
@@ -208,6 +233,8 @@ def fetch_video(api, bvid: str, page: dict, directory: Path, *, http=requests,
                             raise ValueError('视频下载达到时间边界')
                     size = _transfer(url, headers, temporary, timeout, max_bytes, http=http, check=transfer_check)
                 info = video_info(temporary)
+                if not enough_resolution(info):
+                    raise ValueError('解码媒体分辨率低于要求')
                 if expected > 0 and abs(info['duration']-expected) >= max(3, expected*.03):
                     raise ValueError('解码视频时长与来源不符')
                 temporary.replace(path)

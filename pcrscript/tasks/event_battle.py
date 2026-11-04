@@ -34,11 +34,10 @@ def boss_cleared(screen: EventScreen, row: TextBox) -> bool:
 
 
 def boss_locked(screen: EventScreen, row: TextBox) -> bool:
-    """The gold padlock is anchored to the upper-left of its own boss row."""
+    """Match the observed padlock glyph, never the background's gold color."""
     y = row.center[1]
-    hsv = cv.cvtColor(screen.image[y-30:y, 730:760], cv.COLOR_BGR2HSV)
-    gold = cv.inRange(hsv, np.array([12, 90, 140]), np.array([40, 255, 255]))
-    return float(np.mean(gold > 0)) > .3
+    return ImageTemplate('symbol_luna_tower_lock', threshold=.9,
+                         roi=(730, y-30, 760, y)).match(screen.image) is not None
 
 
 def boss_mode(screen: EventScreen) -> int | None:
@@ -85,6 +84,11 @@ class EventCombat:
                 return BattleResult("retreated", reason)
             if self.r.story_dialog(s):
                 continue
+            if s.find('放弃模拟战',(300,120,665,195),exact=True):
+                confirm=s.find('放弃',(485,335,665,385),exact=True)
+                if s.blue_button(confirm):
+                    self.ui.click(confirm)
+                    continue
             button = self.match("btn_giveup_blue", s) or self.match("btn_giveup", s)
             if not button and s.find("战斗菜单|放弃这场|放弃战斗|退出战斗"):
                 button = s.find("放弃|退出", (200, 150, 900, 510), exact=True)
@@ -283,6 +287,8 @@ class EventBattles:
         self.formation = TrialFormation(self.ui)
         self.combat = EventCombat(runner)
         self.source_pools = {}
+        self.source_exclusions = {}
+        self.source_search_progress = {}
 
     def audit_source_trial(self, party, selection, label, mode):
         """Check the live build without pretending it was specified by a guide."""
@@ -300,6 +306,12 @@ class EventBattles:
                 if proof:
                     member.unique = member.unique2 = False
                     member.equipment_evidence = proof
+                else:
+                    # The inspection may stop on the character-strengthening page,
+                    # which the event home navigator cannot leave.
+                    ToHomePage(self.r.robot).run(timeout=60)
+                    self.r.enter()
+                    raise EventUIError(member.name+'的专武状态未确认，跳过此来源队伍，未开战')
                 ToHomePage(self.r.robot).run(timeout=60)
             self.r.enter()
             self.r.quests(bosses=True)
@@ -331,6 +343,11 @@ class EventBattles:
         if any(not m.identity_verified or any(getattr(m, key) is None for key in
                 ('level', 'rank', 'stars', 'skill_level', 'unique', 'unique2')) for m in members):
             raise EventUIError('本期作业队伍身份、培养或专武状态未确认，未开战')
+        from .strategy_trial import declared_trial_issues
+        for member in members:
+            issues = declared_trial_issues(getattr(party,'declared_build',{}).get(normalized(member.name),{}),member)
+            if issues:
+                raise EventUIError(member.name+'：'+'；'.join(issues)+'，未开战')
 
     def quest_catalog(self):
         self.r.quests()
@@ -392,6 +409,39 @@ class EventBattles:
         self.r.report['scenario_support'] = {'order': orders[0], 'basis': 'game_fixed_support', 'mana_cost': 0}
         return party, {'order': orders[0]}
 
+    def open_boss_detail(self, row):
+        self.ui.click(row)
+        return self.ui.wait(lambda s: s.find('BOSS详情', (0, 0, 730, 70)), '首领详情')
+
+    def acquire_boss_pool(self, key, area, difficulty, mode):
+        budget = self.r.options.get('sources', {}).get('max_videos', 4)
+        if type(budget) is not int or not 1 <= budget <= 30:
+            raise ValueError('sources.max_videos必须为1到30的整数')
+        excluded = self.source_exclusions.setdefault(key, set())
+        remaining = budget-len(excluded)
+        if remaining <= 0:
+            self.source_pools[key] = []
+            self.source_search_progress[key] = False
+            return
+        options = {**self.r.options, 'sources': {**self.r.options.get('sources', {}), 'max_videos': remaining}}
+        found, search = boss_parties(options, kind='event', area=area, difficulty=difficulty, mode=mode,
+            default_path='cache/game/strategies/event_teams.yml', check=self.r.check_deadline,
+            exclude_sources=frozenset(excluded))
+        self.source_pools[key] = found
+        prior = len(excluded)
+        if search:
+            excluded.update(search.get('inspected_sources', []))
+            self.r.report.setdefault('source_searches', []).append(search)
+            if search.get('avatar_assets'):
+                from ..game_ui.avatar_assets import ensure_avatar_index
+                self.formation.avatars, _ = ensure_avatar_index(
+                    self.r.options.get('sources', {}).get('avatars'), check=self.r.check_deadline)
+        self.source_search_progress[key] = len(excluded) > prior
+
+    def can_search_more(self, key):
+        return (self.r.options.get('discover_sources', True) and self.source_search_progress.get(key, False)
+                and len(self.source_exclusions.get(key, ())) < self.r.options.get('sources', {}).get('max_videos', 4))
+
     def bosses(self) -> None:
         title = self.r.home().text((0, 160, 940, 460))
         self.r.report["event"] = title
@@ -424,11 +474,13 @@ class EventBattles:
                 if boss_locked(s, row):
                     self.r.report['pending'].append(difficulty+' 入口带锁，尚未解锁')
                     break
+                # Opening a difficulty card does not submit a battle. Read
+                # its detail or actual lock response; gold boss artwork can
+                # occupy the old padlock region even on an available card.
                 if difficulty == 'scenario' and total:
                     self.r.report['pending'].append('剧本模式本次挑战未确认通关，停止重复开战')
                     break
-                self.ui.click(row)
-                detail = self.ui.wait(lambda s: s.find("BOSS详情", (0, 0, 730, 70)), "首领详情")
+                detail = self.open_boss_detail(row)
                 if difficulty == "special_plus":
                     remaining = detail.find(r"\d+/\d+", (800, 385, 940, 450))
                     if remaining is None:
@@ -469,19 +521,13 @@ class EventBattles:
                     key = (source_area, difficulty, mode)
                     if key not in self.source_pools:
                         self.r.report_progress(f'活动首领 · 搜索{source_area} {difficulty} 模式{mode}作业')
-                        found, search = boss_parties(self.r.options, kind='event', area=source_area,
-                            difficulty=difficulty, mode=mode,
-                            default_path='cache/game/strategies/event_teams.yml',
-                            check=self.r.check_deadline)
-                        self.source_pools[key] = found
-                        if search:
-                            self.r.report.setdefault('source_searches', []).append(search)
-                            if search.get('avatar_assets'):
-                                from ..game_ui.avatar_assets import ensure_avatar_index
-                                self.formation.avatars, _ = ensure_avatar_index(
-                                    self.r.options.get('sources', {}).get('avatars'), check=self.r.check_deadline)
+                        self.acquire_boss_pool(key, source_area, difficulty, mode)
                     party = next_boss_party(self.source_pools[key], attempts, mode)
                     if party is None:
+                        if self.can_search_more(key):
+                            self.source_pools.pop(key)
+                            self.r.home()
+                            continue
                         self.r.report["pending"].append(f"{difficulty} 模式{mode} 无可用达标队伍；见来源与编队核验报告")
                         self.r.home()
                         break
@@ -504,8 +550,17 @@ class EventBattles:
                             "build_basis": party.build_basis, "assumptions": party.assumptions, "unready": selection})
                         self.r.home()
                         continue
-                    if party.build_basis == 'local_trial' and self.r.options.get('require_source_settings', False):
-                        self.audit_source_trial(party, selection, label, mode)
+                    if party.build_basis == 'local_trial' and (self.r.options.get('require_source_settings', False)
+                                                               or getattr(party,'declared_build',{})):
+                        try:
+                            self.audit_source_trial(party, selection, label, mode)
+                        except EventUIError as error:
+                            attempts[(mode, party.name)] = party.max_attempts
+                            self.r.report['battles'].append(dict(boss=difficulty, mode=mode,
+                                party=party.name, source=party.source, build_basis=party.build_basis,
+                                unready=dict(reason=str(error), selection=selection)))
+                            self.r.home()
+                            continue
                     attempts[(mode, party.name)] += 1
                 self.r.report_progress(f'活动首领 · {difficulty} 模式{mode}战斗与结算')
                 result = self.combat.run(party, selection.get("order"))

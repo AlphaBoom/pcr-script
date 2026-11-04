@@ -65,7 +65,7 @@ GUI 的 `PortableTools.cs` 管理固定版本工具的下载、SHA-256 校验与
 | [task_story.py](../pcrscript/tasks/task_story.py) | `clear_story`、`get_quest_reward` |
 | [task_activity.py](../pcrscript/tasks/task_activity.py) | `campaign_clean`，按活动类型分发 |
 | [task_story_event.py](../pcrscript/tasks/task_story_event.py) | 剧情类型处理器、`clear_campaign_first_time` |
-| [task_tower.py](../pcrscript/tasks/task_tower.py) | `luna_tower_clean`（回廊扫荡） |
+| [task_tower.py](../pcrscript/tasks/task_tower.py) | `luna_tower_clean`（回廊日常检查）、`luna_tower_climb`（普通层推进） |
 
 `task_combat.py` 包含可复用的 `TeamFormation`、`TeamFormationEx`、`Combat` 子任务，供其他任务通过 Python 调用，未注册为独立命令，不能直接填入配置任务列表。
 

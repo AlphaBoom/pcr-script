@@ -9,7 +9,7 @@ from urllib.parse import urlsplit,urljoin
 import requests
 from ..run_session import atomic_json
 
-SOURCE_CACHE_VERSION = 5
+SOURCE_CACHE_VERSION = 6
 
 
 def video_metadata(data):
@@ -22,10 +22,16 @@ def video_metadata(data):
 
 def source_statements(source):
     """One metadata view for applicability, requirements and their provenance."""
+    comments = source.get('author_comments', [])
+    own = {str(row.get('reply_id')) for row in comments if not row.get('root')}
+    # The author answering a viewer's own account is support, not this guide's requirements.
+    def answers_viewer(row):
+        return (str(row.get('text', '')).startswith('回复 @')
+                or bool(row.get('root')) and str(row['root']) not in own)
     return [(source.get('title', ''), 'source_title'),
             (source.get('description', source.get('desc', '')), 'source_description')]+[
         (row.get('text', ''), 'author_comment:'+str(row.get('reply_id')))
-        for row in source.get('author_comments', [])]
+        for row in comments if not answers_viewer(row)]
 
 
 def advisory_requirement(text):
@@ -86,7 +92,7 @@ def author_comment_clues(response, owner_id, video_url):
                 continue
             bv=re.fullmatch(r'https?://b23\.tv/(BV[0-9A-Za-z]{10})/?',link)
             normalized_links.append('https://www.bilibili.com/video/'+bv[1] if bv else link)
-        clues.append(dict(reply_id=item.get('rpid'),owner_id=str(owner_id),text=message,
+        clues.append(dict(reply_id=item.get('rpid'),root=item.get('root'),owner_id=str(owner_id),text=message,
                           source=video_url,created_at=item.get('ctime'),
                           images=[p['img_src'] for p in content.get('pictures',[]) if p.get('img_src')],
                           links=list(dict.fromkeys(normalized_links))))

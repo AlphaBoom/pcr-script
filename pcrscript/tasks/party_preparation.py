@@ -165,7 +165,9 @@ def rank_candidates(parties, observed, *, available=()):
             incompatible += sum(g['action'].startswith('incompatible') for g in plan['gaps'])
             edits += sum(g['action'] in ('install', 'enhance', 'raise_stars', 'change_stars') for g in plan['gaps'])
             unknown += sum(g['action'] in ('inspect', 'verify_identity') for g in plan['gaps'])
-        return (sum(normalized(m.name) not in owned for m in party.members), incompatible, edits,
+        # Exactly replayable guides come before rosters taken from manual ones.
+        return (sum(normalized(m.name) not in owned for m in party.members),
+                party.build_basis == 'roster_trial', incompatible, edits,
                 unknown, party.build_basis != 'source')
     return sorted(parties, key=score)
 
@@ -215,6 +217,38 @@ def prepare_special(formation, party, order, *, auto=True, expected=None):
     if expected is not None and not same_loadout(expected, result):
         raise EventUIError('特别装备与模拟战不一致，必须重新模拟，未实战')
     return result
+
+
+def cultivate_on_demand(ui, members, *, report, save, home, allow_amulets=False):
+    """After a poor test: raise low stars and fill a missing unique, nothing more."""
+    from ..game_ui.character_equipment import install_missing_unique, open_character_memory
+    from ..game_ui.character_stars import star_maxed, unlocked_stars, upgrade_to_five
+    changed = []
+    for member in members:
+        row = dict(character=member.name)
+        report.setdefault('on_demand_cultivation', []).append(row)
+        try:
+            page = open_character_memory(ui, member.name)
+            maxed = page is not None and star_maxed(page)
+            stars = unlocked_stars(page) if page is not None and not maxed else None
+            row['stars'] = 'max' if maxed else stars
+            # A guide's explicitly lower stars stay untouched.
+            if stars is not None and 1 <= stars < 5 and (member.stars is None or member.stars >= 5):
+                record = {}
+                report.setdefault('star_upgrades', []).append(record)
+                upgrade_to_five(ui, member.name, record, save, allow_amulets=allow_amulets)
+                row['stars_after'] = 5
+            home()
+            if member.unique is not False:
+                row['unique'] = install_missing_unique(ui, member.name, report, save, home,
+                                                       second=member.unique2 is not False)
+        except EventUIError as error:
+            row['error'] = str(error)
+        save()
+        home()
+        if row.get('stars_after') or row.get('unique') == 'installed':
+            changed.append(member.name)
+    return changed
 
 
 def upgrade_party_stars(formation, party, audit, *, options, report, save, leave, reopen, stage,

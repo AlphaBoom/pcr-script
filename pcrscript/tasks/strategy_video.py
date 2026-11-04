@@ -24,7 +24,7 @@ from .strategy_document import Evidence, Fact, empty_member, finalize, export_do
 from .strategy_sources import BORROW_PART, MANUAL_PART, UNVERIFIED_SETTING, discover_sources, get_source_rules, timed_switch_requirement, unparsed_switch_requirement
 from .strategy_inputs import advisory_requirement, declared_region, preferred_sources, source_statements, video_metadata
 
-PARSER_VERSION = 135
+PARSER_VERSION = 152
 FRAME_OCR_VERSION = 1
 COMBAT_AUDIT_SECONDS = 20
 RECOLLECTION_UNSUPPORTED = re.compile(
@@ -429,7 +429,13 @@ def task_source_options(kind: str, options: dict, *, stage=None,
         result.pop('stage', None)
         result.pop('element', None)
         result.update(area=area, difficulty=difficulty, mode=mode,
-                      category_terms=[], aliases=[])
+                      category_terms=[], aliases=result.get('aliases', []))
+        result.setdefault('skip_manual_media', not options.get('prepare_only', False))
+        result.setdefault('skip_long_media', not options.get('prepare_only', False))
+        result.setdefault('max_video_seconds', 300)
+        result.setdefault('minimum_media_quality', 64)
+        result.setdefault('max_download_seconds', 600)
+        result.setdefault('parse_timeout', 1200)
     elif kind == 'recollection':
         from ..game_ui.recollection import AREAS, ALIASES
         if area not in AREAS.values() or type(stage) is not int or not 1 <= stage <= 99:
@@ -447,6 +453,11 @@ def task_source_options(kind: str, options: dict, *, stage=None,
 
 
 def event_page_difficulty(title: str) -> str | None:
+    if (re.search(r'(?<![a-z0-9])SP\s*[＋+]', title, re.I)
+            and re.search(r'(?<![a-z0-9])SP(?![a-z0-9]|\s*[＋+])', title, re.I)):
+        # A multi-difficulty compilation only nominates the page. Its frames
+        # must establish the exact difficulty and mode before using a team.
+        return None
     if re.search(r'特别(?:战斗)?\s*[＋+]|SP\s*[＋+]', title, re.I):
         return 'special_plus'
     if re.search(r'特别(?:战斗)?(?!装备)|(?<![a-z0-9])SP(?![a-z0-9＋+])', title, re.I):
@@ -640,6 +651,8 @@ def choose_pages(source: dict, options: dict) -> list[dict]:
         targets = [p for p in subjugation_pages(source, options) if p['cid'] in required_cids]
     elif kind in ('event', 'revival'):
         wanted = {'difficulty': options.get('difficulty'), 'mode': options.get('mode')}
+        has_difficulty_part = any(event_page_difficulty(p.get('part', p.get('title', ''))) == wanted['difficulty']
+                                  for p in pages)
         targets = [p for p in pages if (scope := page_scope(p, kind)) == wanted]
         if not targets and len(pages) == 1 and page_scope({'part': source.get('title', '')}, kind) == wanted:
             targets = [dict(pages[0], part=source['title'])]
@@ -647,6 +660,12 @@ def choose_pages(source: dict, options: dict) -> list[dict]:
         chosen_cids = {p.get('cid') for p in targets}
         targets += [p for p in pages if p not in requirements and p.get('cid') not in chosen_cids
                     and not page_scope(p, kind)
+                    and not (re.match(r'^\s*(?:抽|扭蛋|ガチャ|序幕|终幕|第\s*[0-9一二三四五六七八九十]+\s*[话話])',
+                                      p.get('part', p.get('title', '')))
+                             and not re.search(r'攻略|作业|打法|说明|必看|要求|需求|练度|培养|SP|EX|模式',
+                                               p.get('part', p.get('title', '')), re.I))
+                    and not (has_difficulty_part
+                             and re.match(r'^\s*(?:[【\[]\s*)?(?:SC|EX)\s*[＋+]?(?:\s*[】\]]|\s|$)', p.get('part', p.get('title', '')), re.I))
                     and event_page_difficulty(p.get('part', p.get('title', ''))) in (None, wanted['difficulty'])]
     else:
         targets = [p for p in pages if p not in requirements]
@@ -856,13 +875,14 @@ def text_constraints(texts, proof: Evidence, *, unparsed_settings=False,
                                                           'rectangle': list(t.rectangle), 'confidence': t.score})))
         unsupported = (RECOLLECTION_UNSUPPORTED.search(t.text) if unsupported_builds else re.search(
             r'属性等级|属性技能|公主骑士|(?<![A-Za-z0-9_.])MP\d+(?![A-Za-z0-9_])|突破', t.text, re.I))
-        if (unsupported and t.text not in ('特别装备设定', '可变更队伍角色的特别装备。')
+        # The formation panel's own labels; OCR can drop the subtitle's full stop.
+        if (unsupported and t.text not in ('特别装备设定', '可变更队伍角色的特别装备。', '可变更队伍角色的特别装备')
                 and not (stadium and stadium_equipment_chrome(texts,t))):
             row['advisory'] = advisory_requirement(t.text)
             global_requirements.append(row)
         # This fixed combat HUD label describes the current switch. SET and
         # AUTO are independently read from their buttons, not inferred here.
-        hud_status = (re.fullmatch(r'连结[爆螺煤]发立即发动开启', t.text)
+        hud_status = (re.fullmatch(r'连.{2}发立即发动开启', t.text)
                       and t.rectangle[0] > 1000 and 40 <= t.center[1] <= 130)
         if not hud_status and manual_requirement(t.text, unparsed_settings=unparsed_settings):
             manual.append(row)
@@ -901,11 +921,12 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
     if options['task_type'] in ('subjugation', 'collaboration'):
         if source.get('comment_pending') or source.get('comment_complete') is False:
             raise ValueError('作者评论补充未读取完成：'+str(source.get('comment_pending') or '仅取得部分评论'))
+        # A boss's free simulation can still judge the roster; anything else needs the image read.
         for comment in source.get('author_comments', []):
-            if comment.get('images'):
+            if comment.get('images') and not options.get('roster_trials'):
                 raise ValueError(f'作者评论{comment.get("reply_id")}含未解析图片，不能确认攻略要求完整')
-    from rapidocr import RapidOCR
-    from .strategy_tables import universal_row
+    from ..game_ui.screen import ocr_engine
+    from .strategy_tables import board_hint, board_reference_cell, guide_board_rows, universal_row
     from ..game_ui.screen import normalized
     api = api or BilibiliApi(timeout=options.get('request_timeout', 20), browser_session=True)
     root = Path(options.get('parsed_dir', 'cache/game/strategies/parsed'))/source['bvid']
@@ -914,7 +935,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
     target = options.get('observed_target')
     target_key = live_target_key(target)
     fingerprint = sha256(json.dumps(dict(version=PARSER_VERSION, source=source, pages=pages,
-                         scope={k: options.get(k) for k in ('task_type', 'stage', 'element', 'area', 'difficulty', 'mode', 'region', 'max_frames_per_page', 'max_video_seconds', 'skip_manual_media', 'skip_long_media')},
+                         scope={k: options.get(k) for k in ('task_type', 'stage', 'element', 'area', 'aliases', 'difficulty', 'mode', 'region', 'minimum_media_quality', 'max_frames_per_page', 'max_video_seconds', 'skip_manual_media', 'skip_long_media')},
                          observed_target=target_key,
                          event={k: options.get(k) for k in ('kind', 'boss', 'boss_number', 'event_id', 'period_start', 'period_end')}
                                if options['task_type'] in ('subjugation', 'stadium', 'collaboration') else {},
@@ -939,8 +960,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
             return dict(cached, cache_hit=True)
     # Match the game's OCR worker limits. Default ONNX sessions can otherwise
     # spin a full thread pool for each engine throughout multi-page parsing.
-    ocr = ocr or RapidOCR(params={"EngineConfig.onnxruntime.intra_op_num_threads": 2,
-                                 "EngineConfig.onnxruntime.inter_op_num_threads": 1})
+    ocr = ocr or ocr_engine()
     from ..game_ui.equipment import EquipmentBadges
     badges = EquipmentBadges()
     names = sorted({str(n) for n in index.names if not str(n).startswith('unit:')}, key=len, reverse=True)
@@ -990,8 +1010,12 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
             source_setting = bool(source_setting or manual)
     # These metadata constraints apply to every candidate in this source.
     # Freeze them before page-specific conditions, which may belong to another plan.
-    blocked_source = bool(source_setting or options['task_type'] in ('subjugation', 'collaboration')
+    unsupported_source = (options['task_type'] in ('subjugation', 'collaboration')
                           and any(not row['advisory'] for row in globals_))
+    # Roster trials still read a manual source's frames, never an unsupported build's.
+    roster_trials = options.get('roster_trials')
+    blocked_source = bool(unsupported_source if roster_trials else source_setting or unsupported_source)
+    board_cids = set()
     for page in pages:
         check()
         page_name = page.get('part', page.get('title', ''))
@@ -1013,10 +1037,10 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
                 pages_report.append(dict(cid=page['cid'], title=page_name,
                                          skipped='标题要求手动操作、借角或未核实TP+2，自动任务不下载此分P'))
                 continue
-        if blocked_source and options.get('skip_manual_media'):
+        if blocked_source and (options.get('skip_manual_media') or roster_trials):
             pages_report.append(dict(cid=page['cid'], title=page_name,
                                      skipped=('来源声明手动、借角或未核实TP+2/大师点条件，自动任务不下载此分P'
-                                              if source_setting else
+                                              if source_setting and not roster_trials else
                                               '来源声明尚未支持的培养或装备条件，自动任务不下载此分P')))
             continue
         page_duration = float(page.get('duration') or 0)
@@ -1033,6 +1057,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
                                        timeout=options.get('request_timeout', 20),
                                        max_seconds=options.get('max_download_seconds', 180), check=check,
                                        **({'preferred_quality': options['media_quality']} if 'media_quality' in options else {}),
+                                       **({'minimum_quality': options['minimum_media_quality']} if 'minimum_media_quality' in options else {}),
                                        **({'refresh': True} if options.get('refresh_media', False) else {}))
         except (requests.RequestException, RuntimeError, ValueError, OSError) as error:
             errors.append(dict(cid=page['cid'], error=str(error)))
@@ -1065,6 +1090,8 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
         last_combat_box = float('-inf')
         last_caption = frozenset()
         confirmation_rows = set()
+        board_reads = {}
+        board_thinned = False
         stadium_detail_rows = set()
         stadium_combat_probes = set()
         # A formation page can recalibrate a recording whose game viewport
@@ -1138,7 +1165,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
                     last_caption = frozenset()
                 caption_changed = bool(caption) and (
                     len(caption & last_caption)/max(1, len(caption | last_caption)) < .5)
-                full_ocr = (options['task_type'] in ('subjugation', 'stadium', 'collaboration') or options.get('observed_target')
+                full_ocr = (options['task_type'] in ('subjugation', 'stadium', 'collaboration', 'event', 'revival') or options.get('observed_target')
                             or not combat_scene or combat_seen <= 2
                             or seconds-last_combat_audit >= COMBAT_AUDIT_SECONDS
                             or caption_changed)
@@ -1183,7 +1210,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
                     # Recruitment banners can mention several servers. Only
                     # the client's fixed controls establish its region here.
                     detected_region = recollection_client_region(texts)
-                if options['task_type'] in ('recollection', 'subjugation', 'stadium', 'collaboration') and detected_region == 'unknown':
+                if options['task_type'] in ('recollection', 'subjugation', 'stadium', 'collaboration', 'event', 'revival') and detected_region == 'unknown':
                     detected_region = recollection_client_region(texts)
                 if detected_region != 'unknown':
                     source_region = detected_region if source_region == 'unknown' else source_region if source_region == detected_region else 'conflict'
@@ -1274,7 +1301,8 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
                 elif options['task_type'] in ('event', 'revival'):
                     area = options.get('area', '')
                     description = source.get('title', '')+' '+source.get('description', '')+' '+page_name
-                    verified = verified and bool(area) and area in description
+                    terms = [area] + options.get('aliases', [])
+                    verified = verified and bool(area) and any(normalized(term) in normalized(description) for term in terms if term)
                     scope = dict(scope, area=area) if scope else {}
                 # Full-name text rows and formation badges also occur outside battle.
                 field_scope = scope if verified else {'chapters': requirement_scope(texts)}
@@ -1336,6 +1364,39 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
                         found = [dict(name=name, rectangle=[], score=proofs[0][1]) for name, proofs in zip(row['names'], row['confidence'])]
                         scope = dict(element=row['element'], chapters=row.get('chapters'))
                         verified = bool(scope['chapters'])
+                if (not found and options.get('roster_trials') and verified and not wide_crop
+                        and not combat_scene and board_hint(texts)):
+                    # A static board lists several teams per frame. Its cells nominate
+                    # rosters only; the account's free simulation still decides.
+                    # Corner animations defeat the static-frame digest. Boards in one part
+                    # can share every label and SET text, so repetition is keyed on the
+                    # rosters actually read; a changed board is always parsed.
+                    boards = guide_board_rows(frame, texts, index)
+                    board_key = (frozenset(normalized(t.text) for t in texts if board_hint([t])),
+                                 frozenset(tuple(board['names']) for board in boards))
+                    board_reads[board_key] = board_reads.get(board_key, 0)+1
+                    if board_reads[board_key] > 4:
+                        continue
+                    if board_reads[board_key] == 4 and not board_thinned:
+                        # Thin the rest of the part once; later boards keep this sampling rate.
+                        board_thinned = True
+                        position = seconds_list.index(seconds)+1
+                        seconds_list[position:] = seconds_list[position::6]
+                    for board in boards:
+                        board_cids.add(page['cid'])
+                        key = json.dumps([scope, board['names']], ensure_ascii=False, sort_keys=True)
+                        team = teams.setdefault(key, dict(task_type=options['task_type'], source=source['url'], scope=scope,
+                            scope_verified=verified, members=[empty_member(name) for name in board['names']], frames=[],
+                            observations=defaultdict(list), identity_evidence=[], auto=Fact(), auto_observations=[],
+                            notes=text_source, excluded_stages=[], global_requirements=[], manual_actions=[]))
+                        team['frames'].append(asdict(proof))
+                        for position, (member, cell) in enumerate(zip(team['members'], board['members'])):
+                            evidence = Evidence(**{**asdict(proof), 'rectangle': cell['rectangle'],
+                                                   'method': 'avatar_feature_board', 'confidence': cell['score']})
+                            team['identity_evidence'].append(dict(name=member['name'], **asdict(evidence)))
+                            if board['instant'] is not None:
+                                team['observations'][member['name']].append(('instant', board['instant'][position], evidence))
+                    continue
                 if not found:
                     continue
                 if verified and (options.get('observed_target') or options['task_type'] == 'stadium'):
@@ -1362,6 +1423,16 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
                                       notes=text_source, excluded_stages=[],
                                       global_requirements=[], manual_actions=[])
                 team = teams[key]
+                if (options['task_type'] in ('event', 'revival') and combat_scene
+                        and not formation_found and verified):
+                    phases = [t for t in texts if t.score >= .97 and t.center[1] < 160
+                              and re.fullmatch(r'(?:阶段|模式|MODE)\s*[123]', t.text, re.I)]
+                    modes = {int(re.search(r'[123]', t.text)[0]) for t in phases}
+                    if len(modes) == 1:
+                        phase = phases[0]
+                        team.setdefault('phase_coverage', []).append(dict(mode=next(iter(modes)),
+                            evidence=asdict(Evidence(**{**asdict(proof), 'method':'combat_phase',
+                                'text':phase.text, 'rectangle':list(phase.rectangle), 'confidence':phase.score}))))
                 if options['task_type'] == 'subjugation' and verified:
                     from .subjugation_guides import damage_reference
                     reference = damage_reference(page, scope, subjugation_scope.maximum, source['url'])
@@ -1448,7 +1519,7 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
             continue
         if len({(p['cid'], p['seconds']) for p in team['frames']}) < 2:
             continue
-        if any(not any(row['name'] == member['name'] and row['confidence'] >= .92
+        if any(not any(row['name'] == member['name'] and (row['confidence'] >= .92 or row['method'] == 'avatar_feature_board')
                        for row in team['identity_evidence']) for member in team['members']):
             continue
         if options['task_type'] == 'subjugation':
@@ -1545,6 +1616,9 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
             def applicable(row):
                 evidence = row.get('evidence', {})
                 action_boss = row.get('scope', {}).get('boss')
+                # A board's level and Rank cells record the author's account, not a requirement.
+                if evidence.get('cid') in board_cids and board_reference_cell(row.get('text', '')):
+                    return False
                 return ((not action_boss or action_boss == team['scope'].get('boss'))
                         and (evidence.get('cid') is None or evidence.get('cid') in cids
                              or evidence.get('method') in ('source_title', 'source_description', 'source_requirements')))
@@ -1558,6 +1632,8 @@ def parse_video_source(source: dict, options: dict, index, *, api=None, ocr=None
         team['manual_actions'] = list({r['text']: r for r in relevant_manual}.values())
         if options['task_type'] == 'collaboration' and (errors or any(p.get('skipped') or p.get('truncated') for p in pages_report)):
             team['manual_actions'].append(dict(text='来源未完整解析，不能确认全部要求'))
+        if any(comment.get('images') for comment in source.get('author_comments', [])):
+            team['manual_actions'].append(dict(text='作者评论含未解析图片，不能确认攻略要求完整'))
         parties.append(finalize(team))
     for party in list(parties):
         if not party.get('scope_verified'):
@@ -1604,7 +1680,7 @@ def acquire_strategies(options: dict, *, api=None, index=None, ocr=None, check=l
     api = api or BilibiliApi(timeout=options.get('request_timeout', 20), browser_session=options.get('browser_session', True))
     report = dict(status='running', parties=[], parsed_sources=[], pending=[], errors=[])
     directory = Path(options.get('parsed_dir', 'cache/game/strategies/parsed'))
-    scope = {k: options.get(k) for k in ('task_type', 'area', 'stage', 'element', 'difficulty', 'mode', 'region', 'source_urls', 'search_effort')}
+    scope = {k: options.get(k) for k in ('task_type', 'area', 'aliases', 'stage', 'element', 'difficulty', 'mode', 'region', 'minimum_media_quality', 'source_urls', 'search_effort')}
     scope['source_rules'] = rules.cache_scope(options)
     scope['search_queries'] = options.get('search_queries', [])
     if exclude_sources:

@@ -16,6 +16,13 @@ def fake_api():
  return a
 
 class SourceTests(TestCase):
+ def test_event_plus_queries_target_plus_without_relabeling_sources(self):
+  queries=source_queries(['合成活动'],'','normal',kind='event',difficulty='special_plus')
+  self.assertEqual(queries[0],'公主连结 国服 合成活动 SP+ 作业')
+  self.assertIn('合成活动  攻略',queries[-1])
+  self.assertEqual(source_queries(['合成活动'],'','normal',kind='event')[0],
+                   '公主连结 国服 合成活动 SP 作业')
+
  def test_stadium_compilation_without_literal_round_is_discovered_but_not_round_proof(self):
   from datetime import datetime,timezone
   from pcrscript.tasks.stadium_strategy import round_scope

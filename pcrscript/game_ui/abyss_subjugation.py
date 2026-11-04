@@ -84,9 +84,9 @@ def difficulty(s, ui=None):
     return labels[0] if len(labels) == 1 else None
 
 
-def fraction(s, roi):
+def fraction(s, roi, minimum=.95):
     item = s.find(r'\d+/\d+', roi, exact=True)
-    if item is None or item.score < .95:
+    if item is None or item.score < minimum:
         return None
     current, maximum = map(int, normalized(item.text).split('/'))
     return (current, maximum) if 0 <= current <= maximum and maximum > 0 else None
@@ -98,7 +98,8 @@ def attempts(s):
 
 
 def detail_attempts(s):
-    value = fraction(s, (495, 440, 580, 480))
+    # Observed at .927 on a correct read; a sweep still compares it with the home count.
+    value = fraction(s, (495, 440, 580, 480), minimum=.9)
     return value[0] if value is not None else None
 
 
@@ -122,10 +123,12 @@ def outpost_batch_entry(s):
 def outpost_batch_confirmation(s):
     if s.find('扫荡券确认', (300, 115, 650, 185), exact=True):
         return False
-    return all((item := s.find(label, roi, exact=True)) and item.score >= .95
-               for label, roi in ((r'一?键扫荡确认', (300, 15, 665, 75)),
-                                  ('取消', (290, 450, 445, 515)),
-                                  ('挑战', (520, 450, 665, 515))))
+    # The stylized title was read exactly at .93; the buttons and the preview
+    # still gate any spending at the higher threshold.
+    return all((item := s.find(label, roi, exact=True)) and item.score >= minimum
+               for label, roi, minimum in ((r'一?键扫荡确认', (300, 15, 665, 75), .9),
+                                           ('取消', (290, 450, 445, 515), .95),
+                                           ('挑战', (520, 450, 665, 515), .95)))
 
 
 def outpost_batch_preview(ui, s):
@@ -154,9 +157,11 @@ def outpost_batch_preview(ui, s):
     ticket_cost = ui.number(s, (215, 374, 262, 405))
     total = ui.number(s, (840, 365, 905, 405))
     stages = s.find(r'[1-3]处', (670, 365, 785, 405), exact=True)
-    if (None in (stamina_cost, stamina_owned, ticket_cost, total) or stages is None
-            or stages.score < .95 or int(normalized(stages.text)[0]) != len(labels)
-            or ticket_cost != total or total != sum(amounts.values())):
+    # The single-digit ticket cost can be missed by OCR; the total and the rows
+    # still agree here, and the final confirmation rereads it before spending.
+    if (None in (stamina_cost, stamina_owned, total) or stages is None
+            or stages.score < .9 or int(normalized(stages.text)[0]) != len(labels)
+            or ticket_cost not in (None, total) or total != sum(amounts.values())):
         return None
     for label, roi in (('消耗体力', (45, 340, 160, 376)),
                        (r'消耗(?:扫荡)?券', (45, 374, 160, 410)),
@@ -349,7 +354,8 @@ def cleared_boss(ui, s):
         return False
     # OCR commonly omits this tiny standalone dash. Require its own dark,
     # short horizontal component; a disabled button alone is insufficient.
-    patch = cv.cvtColor(s.image[321:348, 875:922], cv.COLOR_BGR2GRAY)
+    # The crop stops before the panel's dark right border at x=921.
+    patch = cv.cvtColor(s.image[321:348, 875:919], cv.COLOR_BGR2GRAY)
     _, _, stats, centers = cv.connectedComponentsWithStats((patch < 110).astype(np.uint8))
     parts = [(stat, center) for stat, center in zip(stats[1:], centers[1:]) if stat[4] >= 3]
     if len(parts) == 1:
@@ -435,12 +441,16 @@ def result_win(ui, s):
         return False
     roi = (275, 70, 685, 250)
     pattern = r'WIN[!！]?|战斗胜利|胜利'
+    def confident(item):
+        # The stylized banner reads WIN! at about .94; an exact English match
+        # in this region has no observed look-alike, other than NIM below.
+        return item is not None and item.score >= (.9 if normalized(item.text).upper().startswith('WIN') else .95)
     won = s.find(pattern, roi, exact=True)
-    if won is None or won.score < .95:
+    if not confident(won):
         # Orientation classification can rotate the stylized WIN into NIM.
         # Re-read the upright banner; never treat that misread as victory.
         won = ui.read_region(s, roi, classify=False).find(pattern, roi, exact=True)
-    return won is not None and won.score >= .95
+    return confident(won)
 
 
 def result_damage(ui, s):

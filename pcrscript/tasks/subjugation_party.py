@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 import sqlite3
 
 from .event_strategy import readiness
 from .strategy_formation import StrategyFormation, StrategyTarget
-from .party_preparation import (audit_declared_build, numeric_equipment_unknown,
+from .party_preparation import (BUILD_FIELDS, audit_declared_build, numeric_equipment_unknown,
     read_numeric_equipment, upgrade_party_stars, prepare_character_database, catalogue_issues)
 from ..game_ui import abyss_subjugation as field
 from ..game_ui.avatar_assets import ensure_avatar_index
@@ -38,19 +39,24 @@ def prepare_avatars(runner):
         runner.avatars_ready = True
 
 
-def require_event_talent(runner, party):
-    """Require every guide or audited member to match this event's attribute."""
+def require_event_talent(runner, party, *, allow_mixed=False):
+    """Keep boss restrictions separate from legal mixed outpost parties."""
     talent = runner.event.extras.get('talent_id')
     if type(talent) is not int or talent not in range(1, 6):
         raise EventUIError('活动加成属性未知')
     if not hasattr(runner, 'character_talents'):
         runner.character_talents = character_talents(runner.options.get('avatars', {}).get('database', 'cache/redive_cn.db'))
-    if any(runner.character_talents.get(normalized(member.name)) != talent for member in party.members):
+    talents=[runner.character_talents.get(normalized(member.name)) for member in party.members]
+    if any(value not in range(1,6) for value in talents):
+        raise EventUIError('队伍角色属性资料未知')
+    if not allow_mixed and any(value != talent for value in talents):
         raise EventUIError('完整身份核验后队伍未全部匹配本期加成属性')
 
 
 class SubjugationFormation(StrategyFormation):
     """Use shared account selection; pin a simulated party before real battle."""
+    portrait_source_trial = True
+
     def __init__(self, ui):
         super().__init__(ui)
         self.unreleased = {}
@@ -111,7 +117,51 @@ def recover_equipment(runner, names):
         ToHomePage(runner.robot).run(timeout=60)
 
 
-def guide_party(runner, seed, reopen, *, allow_substitutions=True):
+def declares_build(party):
+    """Default empty equipment counts are not a source requirement."""
+    return any(getattr(member, key) is not None and (key != 'equipment' or getattr(member, key))
+               for member in party.members for key in BUILD_FIELDS)
+
+
+def portrait_party(runner, seed):
+    """A roster with no declared build is settled by its free trial, not detail pages."""
+    if not getattr(runner.formation, 'portrait_source_trial', False) or declares_build(seed):
+        return None
+    if {normalized(m.name) for m in seed.members} & set(getattr(runner.formation, 'unowned', ())):
+        return None
+    runner.report_progress('按头像选入攻略队伍')
+    order = runner.formation.select_by_portrait([member.name for member in seed.members])
+    if order is None:
+        return None
+    runner.report.setdefault('party_audits', []).append(dict(source=seed.source,
+        build_basis='portrait_trial', order=order))
+    return replace(seed, build_basis='portrait_trial', allow_deaths=0,
+                   assumptions=list(seed.assumptions)+['攻略未声明培养要求；头像确认五人后以实测结果判断，未读账号培养']), order
+
+
+def substituted_portrait_party(runner, seed):
+    """Replace members this run could not find, then let the free trial judge the team."""
+    formation = runner.formation
+    names = [normalized(m.name) for m in seed.members]
+    missing = [n for n in names if n in getattr(formation, 'unowned', ())]
+    if not getattr(formation, 'portrait_source_trial', False) or not missing or declares_build(seed):
+        return None
+    source = dict(source=seed.source, names=list(names), required_stars=[m.stars for m in seed.members])
+    adapted, _ = formation.adapted_source(trial_stage(runner, seed.name), source, missing)
+    if adapted is None:
+        return None
+    members = [m if n == name else replace(m, name=n) for m, name, n in zip(seed.members, names, adapted['names'])]
+    quick = portrait_party(runner, replace(seed, members=members))
+    if quick is None:
+        return None
+    party, order = quick
+    party.damage_reference = {}
+    party.assumptions.extend('共享编队缺员替补：'+a['missing']+' → '+a['replacement'] for a in adapted['adaptations'])
+    party.assumptions.append('替补队伍不继承原攻略伤害；首领须免费模拟击杀，或存活至时限且符合首通刀数预算')
+    return party, order
+
+
+def guide_party(runner, seed, reopen, *, allow_substitutions=True, outpost=False):
     """Keep source switches, while pinning a trial's separately observed build."""
     prepare_avatars(runner)
     phase = '核验攻略队伍 · 衣装、等级、技能与专武'
@@ -121,7 +171,13 @@ def guide_party(runner, seed, reopen, *, allow_substitutions=True):
         runner.report.setdefault('party_audits', []).append(dict(source=seed.source, unready=issues,
             character_database=runner.formation.character_database))
         raise EventUIError('攻略要求与当前国服角色资料不符：'+str(issues))
-    require_event_talent(runner, seed)
+    require_event_talent(runner, seed,allow_mixed=outpost)
+    if not runner.options.get('allow_five_star_upgrade'):
+        quick = substituted_portrait_party(runner, seed) if allow_substitutions else portrait_party(runner, seed)
+        if quick:
+            require_event_talent(runner, quick[0], allow_mixed=outpost)
+            return quick
+        runner.report_progress(phase)
     runner.formation.allow_substitutions = allow_substitutions
     numeric = numeric_equipment_unknown(seed, runner.formation.observed)
     if numeric:
@@ -170,5 +226,5 @@ def guide_party(runner, seed, reopen, *, allow_substitutions=True):
     party.assumptions.extend('共享编队缺员替补：'+a['missing']+' → '+a['replacement'] for a in adaptations)
     if adaptations:
         party.assumptions.append('替补队伍不继承原攻略伤害；首领须免费模拟击杀，或存活至时限且符合首通刀数预算')
-    require_event_talent(runner, party)
+    require_event_talent(runner, party,allow_mixed=outpost)
     return party, order

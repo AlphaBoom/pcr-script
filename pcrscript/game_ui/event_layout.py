@@ -6,8 +6,13 @@ import numpy as np
 def navigation_exit(screen):
     """Leave an observed story-event selector without clicking through a modal."""
     if screen.find('一?键扫荡确认|扫荡券确认|扫荡结果|获得道具|扫荡完成|扫荡券使用结果|'
-                   'BOSS详情|关卡详情|队伍编组|自动推进设定'):
+                   'BOSS详情|关卡详情|队伍编组|自动推进设定|解锁首领战'):
         return None
+    story = screen.find('活动剧情', (45, 0, 300, 65), exact=True)
+    if (story and story.score >= .95
+            and screen.find(r'第\d+话', (0, 65, 160, 490), exact=True)
+            and not screen.find('关闭|确认|取消|跳过', (200, 100, 800, 515), exact=True)):
+        return (32, 30)
     quests = screen.find('活动关卡.*首领', (0, 0, 330, 65), exact=True)
     if (quests and quests.score >= .95
             and screen.find('活动关卡', (450, 55, 730, 95), exact=True)

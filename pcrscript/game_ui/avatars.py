@@ -4,11 +4,14 @@ Only labels confirmed in the game's character-details page enter this index.
 All visible cards are queried against one in-memory matrix. New characters add
 rows to the index rather than requiring neural-network training.
 """
+from itertools import permutations
 from pathlib import Path
 import os
 
 import cv2 as cv
 import numpy as np
+
+from .screen import normalized
 
 
 def card_rectangles(image):
@@ -99,6 +102,45 @@ class AvatarIndex:
         np.savez_compressed(temporary, version=1,
                             names=np.asarray(self.names), features=self.matrix)
         temporary.replace(self.path/"index.npz")
+
+    def best(self, picture):
+        """The single closest identity and its score; costumes and strangers can sit close behind."""
+        row = feature(picture) @ self.matrix.T
+        index = int(np.argmax(row))
+        return self.names[index], float(row[index])
+
+    def expected_identity(self, picture, wanted, minimum=.92, tie=.001):
+        """Confirm a name already narrowed by typed search or a chosen roster.
+
+        Unrelated faces routinely score within query()'s margin, but they cannot
+        appear in that narrowed set. The wanted name must still be the closest.
+        """
+        if not self.names:
+            return None
+        row = feature(picture) @ self.matrix.T
+        wanted = set(wanted)
+        scores = [float(score) for name, score in zip(self.names, row) if normalized(name) in wanted]
+        if not scores or max(scores) < minimum or max(scores) < float(row.max())-tie:
+            return None
+        return next(name for name, score in zip(self.names, row)
+                    if normalized(name) in wanted and float(score) == max(scores))
+
+    def assign_expected(self, pictures, wanted, minimum=.8, margin=.01):
+        """Pair unread slots with the members known to fill them; any other pairing must score worse."""
+        if not self.names or len(pictures) != len(wanted):
+            return None
+        rows = np.stack([feature(p) for p in pictures]) @ self.matrix.T
+        normal = [normalized(n) for n in self.names]
+        scores = [[max((float(s) for n, s in zip(normal, row) if n == name), default=-1.) for name in wanted]
+                  for row in rows]
+        ranked = sorted(((sum(scores[i][j] for i, j in enumerate(p)), p)
+                         for p in permutations(range(len(wanted)))), reverse=True)
+        total, best = ranked[0]
+        if min(scores[i][j] for i, j in enumerate(best)) < minimum:
+            return None
+        if len(ranked) > 1 and total-ranked[1][0] < margin:
+            return None
+        return [wanted[j] for j in best]
 
     def query(self, pictures, minimum=.92, margin=.06):
         if not pictures:

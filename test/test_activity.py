@@ -1,6 +1,9 @@
 """Synthetic activity scheduling; game handlers keep their own UI regressions."""
 import copy
+from contextlib import closing
 import json
+import sqlite3
+from itertools import combinations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -23,6 +26,72 @@ class ActivityTests(TestCase):
 
     def robot(self, config):
         return SimpleNamespace(driver=Mock(), task_config=config, _task_output=self.root)
+
+    def test_registered_dispatch_enters_home_before_activity_handlers(self):
+        from pcrscript import Robot
+        robot = Robot(Mock(get_screen_size=Mock(return_value=(960, 540))), show_progress=False)
+        calls = []
+        with patch('pcrscript.robot.ToHomePage.run', side_effect=lambda **kw: calls.append('home')), \
+                patch.object(ActivityDaily, 'run', side_effect=lambda: calls.append('activities') or dict(status='complete')):
+            result = robot.run_task('campaign_clean')
+        self.assertEqual(calls, ['home', 'activities'])
+        self.assertEqual(result['status'], 'complete')
+
+    def test_every_concurrent_subset_runs_all_active_types_from_database(self):
+        from pcrscript.masterdata import schema
+        from pcrscript.news import _build_event_news
+        active_types = ['collaboration_raid', 'revival', 'story']
+        database = self.root/'synthetic.db'
+        with closing(sqlite3.connect(database)) as conn:
+            for name, rule in schema().items():
+                conn.execute('CREATE TABLE '+name+' ('+','.join(
+                    column+' '+field['type'] for column, field in rule['columns'].items())+')')
+            for count in range(1, 4):
+                for active in combinations(active_types, count):
+                    with self.subTest(active=active):
+                        for table in ('seven_schedule', 'hatsune_schedule', 'mre_schedule'):
+                            conn.execute('DELETE FROM '+table)
+                        start, end = '2000/01/01 00:00:00', '2099/01/01 00:00:00'
+                        if 'story' in active:
+                            conn.execute('INSERT INTO seven_schedule '
+                                         '(schedule_id,event_id,event_type,start_time,end_time) VALUES(1,2,1,?,?)', (start,end))
+                        if 'revival' in active:
+                            conn.execute('INSERT INTO hatsune_schedule '
+                                         '(event_id,original_event_id,start_time,end_time) VALUES(3,1,?,?)', (start,end))
+                        if 'collaboration_raid' in active:
+                            conn.execute('INSERT INTO mre_schedule '
+                                         '(schedule_id,mre_id,event_type,start_time,end_time) VALUES(1,2,1,?,?)', (start,end))
+                        conn.commit()
+                        snapshot = _build_event_news(self.root, database.name)
+                        snapshot.source = dict(provider='game_cdn')
+                        robot = self.robot({})
+                        robot._event_news = snapshot
+                        visited = []
+                        def run(child, *args, **kwargs):
+                            visited.append(child.config_section)
+                            return dict(status='complete')
+                        with patch.object(CollaborationRaid, 'run', run), \
+                                patch.object(RevivalEventOnce, 'run', run), \
+                                patch.object(CampaignClean, 'run', run), \
+                                patch('pcrscript.tasks.task_home.ToHomePage.run') as home:
+                            report = ActivityDaily(robot).run()
+                        self.assertEqual(visited, [dict(collaboration_raid='CollaborationRaid',
+                            revival='RevivalEvent',story='StoryEvent')[kind] for kind in active])
+                        self.assertEqual(home.call_count, len(active)-1)
+                        self.assertEqual(report['status'], 'complete')
+
+    def test_unavailable_child_restores_home_before_next_live_type(self):
+        snapshot = EventNews(collaborationRaid=Event(0,10**12,'Synthetic raid'),
+                             hatsune=Event(0,10**12,'Synthetic story'), source=dict(provider='game_cdn'))
+        robot = self.robot({})
+        robot._event_news = snapshot
+        calls = []
+        with patch.object(CollaborationRaid, 'run', side_effect=lambda: calls.append('raid') or dict(status='unavailable')), \
+                patch.object(CampaignClean, 'run', side_effect=lambda *a, **kw: calls.append('story') or dict(status='complete')), \
+                patch('pcrscript.tasks.task_home.ToHomePage.run', side_effect=lambda **kw: calls.append('home')):
+            report = ActivityDaily(robot).run()
+        self.assertEqual(calls, ['raid','home','story'])
+        self.assertEqual(report['status'], 'complete')
 
     def test_concurrent_types_keep_config_reports_and_options_separate(self):
         config = dict(Activities=dict(types=['collaboration_raid', 'revival', 'story'],

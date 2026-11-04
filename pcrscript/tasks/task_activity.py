@@ -38,7 +38,7 @@ def handler_config(config, kind, options):
     return result
 
 
-@register('campaign_clean')
+@register('campaign_clean', requires_home=True)
 class ActivityDaily(TimeLimitTask):
     config_section = 'Activities'
 
@@ -71,7 +71,7 @@ class ActivityDaily(TimeLimitTask):
         handlers = {'story': CampaignClean, 'revival': RevivalEventOnce, 'collaboration_raid': CollaborationRaid}
         root = Path(self.task_options().get('output', 'cache/daily/activities'))
         report = dict(status='running', activities=[], pending=[])
-        previous_complete = False
+        previous_executed = False
         try:
             news = None
             if only == 'all':
@@ -100,9 +100,9 @@ class ActivityDaily(TimeLimitTask):
                 child_robot = copy(self.robot)
                 child_robot.task_config = child_config
                 child_robot._task_output = root/kind
-                if previous_complete:
+                if previous_executed:
                     ToHomePage(self.robot).run(timeout=60)
-                    previous_complete = False
+                    previous_executed = False
                 child = handlers[kind](child_robot)
                 try:
                     if kind == 'story':
@@ -122,7 +122,7 @@ class ActivityDaily(TimeLimitTask):
                     report['pending'].extend(kind+'：'+str(reason) for reason in result.get('pending', []))
                     report['pending'].append('本类型未核验完成，保留现场；其余类型留待接续')
                     return report
-                previous_complete = status == 'complete'
+                previous_executed = True
             report['status'] = 'complete' if any(a['status'] in ('complete', 'already_complete')
                                                for a in report['activities']) else 'unavailable'
             return report

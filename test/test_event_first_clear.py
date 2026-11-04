@@ -50,6 +50,22 @@ class FirstEntryTests(TestCase):
         self.assertEqual(len(b.r.report['source_trial_audits']), 1)
         self.assertIs(b.r.report['source_trial_audits'][0]['observed'][0]['unique'], False)
 
+    def test_unresolved_equipment_stops_before_remaining_audits_and_reselection(self):
+        from pcrscript.tasks.event_strategy import CharacterStatus
+        b=EventBattles.__new__(EventBattles);b.ui=Mock();b.r=Mock(report={})
+        members=[CharacterStatus(f'角色{i}',identity_verified=True,unique=None,unique2=None) for i in range(5)]
+        b.formation=Mock(observed={m.name:m for m in members})
+        party=SimpleNamespace(name='synthetic',source='https://example.com',members=members)
+        with patch('pcrscript.game_ui.character_equipment.inspect_unreleased_equipment',return_value=None) as inspect,                 patch('pcrscript.tasks.task_home.ToHomePage') as home:
+            with self.assertRaisesRegex(EventUIError,'专武状态未确认'):
+                b.audit_source_trial(party,{},'特别',1)
+        inspect.assert_called_once_with(b.ui,'角色0')
+        b.formation.select.assert_not_called()
+        # Leave the strengthening page through the shared navigator, then back to the event.
+        home.return_value.run.assert_called_once_with(timeout=60)
+        b.r.enter.assert_called_once_with()
+        b.r.quests.assert_not_called()
+
     def test_source_trial_audit_blocks_unknown_build_and_changed_lineup(self):
         from pcrscript.tasks.event_strategy import CharacterStatus
         b = EventBattles.__new__(EventBattles)
@@ -63,6 +79,10 @@ class FirstEntryTests(TestCase):
         party = SimpleNamespace(name='synthetic', source='https://example.com', members=members)
         selection = dict(order=[m.name for m in members])
         b.audit_source_trial(party, selection, '特别', 1)
+        party.declared_build={members[0].name:dict(stars=3)}
+        with self.assertRaisesRegex(EventUIError,'来源已声明stars'):
+            b.audit_source_trial(party,selection,'特别',1)
+        party.declared_build={}
         members[0].skill_level = None
         with self.assertRaisesRegex(EventUIError, '培养或专武'):
             b.audit_source_trial(party, selection, '特别', 1)
@@ -423,9 +443,63 @@ class FirstClearTests(TestCase):
 
 
 class ScenarioSupportTests(TestCase):
-    def test_boss_lock_does_not_borrow_neighbouring_row(self):
+    def test_unknown_trial_equipment_skips_party_without_battle(self):
+        from pcrscript.tasks.event_strategy import EventParty
+        b = EventBattles.__new__(EventBattles)
+        b.ui = Mock()
+        b.r = SimpleNamespace(options=dict(require_source_settings=True),
+            report=dict(battles=[],pending=[]), check_deadline=Mock(), report_progress=Mock(), log=Mock())
+        b.r.home = Mock(return_value=frame(('合成活动',400,200)))
+        b.r.quests = Mock(return_value=frame(('剧本模式',825,230),('特别',825,302),('特别战斗+',825,371)))
+        b.open_boss_detail = Mock(return_value=frame(('特别战斗/模式1',260,45)))
+        party = EventParty('synthetic','https://example.com/source',[],build_basis='local_trial')
+        b.source_pools = {('合成活动','special',1):[party]}
+        b.formation = Mock()
+        b.formation.select.return_value = (True,dict(order=[]))
+        b.audit_source_trial = Mock(side_effect=EventUIError('专武状态未确认，未开战'))
+        b.can_search_more = Mock(return_value=False)
+        b.combat = Mock()
+        with patch('pcrscript.news.fetch_event_news',return_value=SimpleNamespace(hatsune=SimpleNamespace(name='合成活动'))), \
+                patch('pcrscript.tasks.event_battle.next_boss_party',side_effect=[party,None]), \
+                patch('pcrscript.tasks.event_battle.boss_cleared',side_effect=lambda s,row: row.text=='剧本模式'), \
+                patch('pcrscript.tasks.event_battle.boss_locked',side_effect=lambda s,row: row.text=='特别战斗+'):
+            b.bosses()
+        b.combat.run.assert_not_called()
+        self.assertIn('专武状态未确认',b.r.report['battles'][0]['unready']['reason'])
+        self.assertTrue(any('无可用' in reason for reason in b.r.report['pending']))
+
+    def test_source_retries_share_budget_and_exclude_unusable_sources(self):
+        b = EventBattles.__new__(EventBattles)
+        b.r = SimpleNamespace(options=dict(sources=dict(max_videos=3)), report={}, check_deadline=Mock())
+        b.source_pools, b.source_exclusions, b.source_search_progress = {}, {}, {}
+        key = ('合成活动', 'special', 1)
+        with patch('pcrscript.tasks.event_battle.boss_parties', side_effect=[
+                ([], dict(inspected_sources=['https://example.com/one'])),
+                ([], dict(inspected_sources=['https://example.com/two', 'https://example.com/three']))]) as acquire:
+            b.acquire_boss_pool(key, *key)
+            self.assertTrue(b.can_search_more(key))
+            b.acquire_boss_pool(key, *key)
+            self.assertFalse(b.can_search_more(key))
+        self.assertEqual(acquire.call_args_list[0].args[0]['sources']['max_videos'], 3)
+        self.assertEqual(acquire.call_args_list[1].args[0]['sources']['max_videos'], 2)
+        self.assertEqual(acquire.call_args_list[1].kwargs['exclude_sources'], frozenset(['https://example.com/one']))
+
+    def test_gold_artwork_does_not_block_reading_available_boss_detail(self):
         s = frame(('特别', 825, 302), ('特别战斗+', 825, 371))
-        s.image[342:370, 731:759] = (30, 180, 230)
+        s.image[272:302, 730:760] = (30, 180, 230)
+        self.assertFalse(boss_locked(s, s.items[0]))
+        detail = frame(('BOSS详情', 130, 40), ('特别战斗/模式1', 260, 45))
+        b = EventBattles.__new__(EventBattles)
+        b.ui = ReplayUI([detail])
+        self.assertIs(b.open_boss_detail(s.items[0]), detail)
+        self.assertEqual(b.ui.clicks, ['特别'])
+
+    def test_padlock_glyph_is_associated_only_with_its_own_row(self):
+        import cv2 as cv
+        from pathlib import Path
+        s = frame(('特别', 825, 302), ('特别战斗+', 825, 371))
+        glyph = cv.imread(str(Path(__file__).parents[1]/'images/symbol_luna_tower_lock.png'))
+        s.image[353:353+glyph.shape[0], 732:732+glyph.shape[1]] = glyph
         self.assertFalse(boss_locked(s, s.items[0]))
         self.assertTrue(boss_locked(s, s.items[1]))
 

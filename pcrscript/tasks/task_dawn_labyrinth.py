@@ -91,6 +91,7 @@ class DawnLabyrinth(BaseTask):
         raise EventUIError(description + '超时，未重复消费')
 
     def enter(self):
+        from ..game_ui.navigation import exploration_list_exit
         for _ in range(30):
             screen = self.capture()
             if recollection_receipt(screen):
@@ -121,7 +122,7 @@ class DawnLabyrinth(BaseTask):
                 continue
             if maze.home(screen):
                 return screen
-            if (cancel := subjugation_navigation_exit(screen) or recollection_navigation_exit(screen)) is not None:
+            if (cancel := exploration_list_exit(screen) or subjugation_navigation_exit(screen) or recollection_navigation_exit(screen)) is not None:
                 self.ui.click(cancel)
                 continue
             if maze.bulk_confirmation(screen) or maze.sweep_confirmation(screen):

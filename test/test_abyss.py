@@ -379,16 +379,30 @@ class AbyssTests(TestCase):
         self.assertEqual([call.args[0].text for call in ui.click.call_args_list],
                          ['公会之家','关闭','全部收取','关闭'])
 
+    def test_special_equipment_commit_waits_out_the_connection_overlay(self):
+        from pcrscript.game_ui.special_equipment import formation_settled
+        self.assertFalse(formation_settled(screen(('队伍编组',480,42),('正在进行数据连接',480,270))))
+        self.assertTrue(formation_settled(screen(('队伍编组',480,42))))
+        self.assertFalse(formation_settled(screen(('正在进行数据连接',480,270))))
+
+    def test_guild_house_empty_toast_is_not_a_receipt_timeout(self):
+        abyss=screen(('公会之家',654,525))
+        house=screen(('体力',434,24),('92/416',504,23),('全部收取',900,444))
+        toast=screen(('体力',434,24),('92/416',504,23),('没有未收取的道具。',480,270),('全部收取',900,444))
+        ui=Mock();ui.wait.side_effect=[house,toast]
+        self.assertEqual(collect_produced_stamina(ui,abyss),dict(before=92,after=92,empty=True))
+        self.assertEqual([call.args[0].text for call in ui.click.call_args_list],['公会之家','全部收取'])
+
     def test_guild_house_unknown_receipt_stops_without_claim_of_stamina(self):
         abyss=screen(('公会之家',654,525))
         house=screen(('体力',434,24),('6/413',504,23),('全部收取',900,444))
         receipt=screen(('全部收取',480,39),('收取了以下道具。',475,75),
                        ('扫荡券×44',384,145),('关闭',478,482))
-        ui=Mock();ui.wait.side_effect=[house,receipt]
+        ui=Mock();ui.wait.side_effect=[house,receipt,house]
         with self.assertRaisesRegex(EventUIError,'没有可确认的体力'):
             collect_produced_stamina(ui,abyss)
         self.assertEqual([call.args[0].text for call in ui.click.call_args_list],
-                         ['公会之家','全部收取'])
+                         ['公会之家','全部收取','关闭'])
 
     def test_guild_house_recovery_requires_matching_stage_detail(self):
         task=object.__new__(AbyssPush);task.ui=Mock()

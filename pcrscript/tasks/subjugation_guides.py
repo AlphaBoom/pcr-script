@@ -15,6 +15,7 @@ ELEMENTS = ('fire', 'water', 'wind', 'light', 'dark')
 LABELS = ('火', '水', '风', '光', '暗')
 SHARED_REQUIREMENTS = re.compile(r'通用|共同|共用|公共|全局|所有|全部')
 BOSS_LABEL = re.compile(r'Boss|首领|[1-3]\s*王', re.I)
+ATTACK_PLAN = re.compile(r'(?:\d+|[一二两三四五六七八九十])\s*刀')
 BUILD_LABEL = re.compile(r'等级|(?<![A-Za-z])Lv|Rank|(?<![A-Za-z])R\s*\d|技能|专武|专用装备|专\s*\d|星级|星数|[0-9一二三四五六七八九十]+[星★]', re.I)
 BUILD_VALUE = re.compile(
     r'(?:[1-6][星★]|(?:等级|Lv\.?|Rank|R|技能(?:等级)?)[：:=]?\d{1,3}(?!\d)|'
@@ -31,6 +32,8 @@ def source_options(options, event, *, kind='outpost', difficulty='高难', boss=
         raise ValueError('本期加成属性未知，不能取得攻略')
     result = dict(options.get('sources', {}))
     result.pop('observed_target', None)
+    # A boss's free simulation can test a manual guide's roster on fixed settings.
+    roster_trials = kind == 'boss' and bool(options.get('allow_local_trials'))
     result.update(task_type='subjugation', region='cn', area=event.extras['title'],
                   aliases=['深渊讨伐战', '深域讨伐战'], category_terms=[], stage='',
                   element=ELEMENTS[talent-1], kind=kind, difficulty=difficulty, boss=boss,
@@ -38,13 +41,15 @@ def source_options(options, event, *, kind='outpost', difficulty='高难', boss=
                   event_id=event.extras['abyss_id'], period_start=event.startTimestamp,
                   period_end=event.endTimestamp, search=options.get('discover_sources', True),
                   source_urls=options.get('source_urls') or result.get('source_urls', []),
-                  skip_manual_media=True, skip_long_media=True)
+                  roster_trials=roster_trials, skip_manual_media=not roster_trials, skip_long_media=True)
     result.setdefault('max_videos', 4)
     result.setdefault('max_pages_per_video', 12)
     result.setdefault('max_frames_per_page', 96)
     result.setdefault('max_video_seconds', 600)
-    result.setdefault('parse_timeout', 300 if kind == 'boss' else 1800)
+    result.setdefault('parse_timeout', 300)
     result.setdefault('max_download_seconds', 180)
+    result.setdefault('media_quality', 64)
+    result.setdefault('minimum_media_quality', 64)
     return result
 
 
@@ -88,10 +93,8 @@ def page_scope(title):
     difficulty = next((d for d in ('普通', '困难', '高难') if d in title), None)
     if not difficulty and re.search(r'(?<![A-Za-z])EX(?![A-Za-z])', title, re.I):
         difficulty = '高难'
-    if not difficulty:
-        return {}
     if re.search(r'前哨', title):
-        return dict(kind='outpost', difficulty=difficulty)
+        return dict(kind='outpost', **({'difficulty':difficulty} if difficulty else {}))
     return {}
 
 
@@ -104,26 +107,52 @@ def choose_pages(source, options):
     exact = [p for p in pages if boss in p.get('part', p.get('title', ''))]
     # Numbered Boss parts are candidates only; their frames must prove the name.
     number = options.get('boss_number')
-    numbered = [p for p in pages if type(number) is int and 1 <= number <= 3
-        and re.search(r'Boss\s*'+str(number)+r'(?!\d)|(?<!\d)'+str(number)+r'\s*王|首领\s*'+str(number)+r'(?!\d)',
-                      p.get('part', p.get('title', '')), re.I)]
+    numbered = [p for p in pages if numbered_boss_title(p.get('part', p.get('title', '')), number)]
     return exact or numbered or [p for p in pages if re.search(r'Boss|首领|王', p.get('part', p.get('title', '')), re.I)] or (
         pages if len(pages) == 1 else [])
+
+
+def numbered_boss_title(title, number):
+    if type(number) is not int or not 1 <= number <= 3:
+        return False
+    return bool(re.search(r'Boss\s*'+str(number)+r'(?!\d)|(?<!\d)(?:'+str(number)+'|'+'一二三'[number-1]+
+                          r')\s*王|首领\s*'+str(number)+r'(?!\d)', title, re.I))
+
+
+def other_fight_page(title, pages, options):
+    """A named attack plan belongs to its own fight; unknown titles stay readable."""
+    if options['kind'] == 'boss' and re.match(r'\s*(?:[【\[]\s*)?前哨', title):
+        return not BOSS_LABEL.search(title)
+    if SHARED_REQUIREMENTS.search(title) and '前哨' not in title or not ATTACK_PLAN.search(title):
+        return False
+    if options['kind'] == 'outpost':
+        return '前哨' not in title
+    def targeted(text):
+        return (bool(options.get('boss')) and options['boss'] in text
+                or numbered_boss_title(text, options.get('boss_number')))
+    # Without a page naming this boss, another title may be a differently written name.
+    return not targeted(title) and any(targeted(p.get('part', p.get('title', ''))) for p in pages)
 
 
 def requirement_pages(source, options):
     """Any page may carry conditions unless it explicitly targets another fight."""
     result = []
-    for page in source.get('pages', []):
+    pages = source.get('pages', [])
+    for page in pages:
         title = page.get('part', page.get('title', ''))
-        if title.strip() and not relevant_statements(title, options):
+        if title.strip() and (not relevant_statements(title, options) or other_fight_page(title, pages, options)):
             continue
         result.append(page)
     return result
 
 
 def visible_scope(texts, page, options):
-    metadata = page_scope(page.get('part', page.get('title', '')))
+    title = page.get('part', page.get('title', ''))
+    metadata = page_scope(title)
+    if (not metadata and options.get('roster_trials') and options.get('boss')
+            and (options['boss'] in title or numbered_boss_title(title, options.get('boss_number')))):
+        # The tier stays unknown; only the free simulation can qualify this roster.
+        metadata = dict(kind='boss', boss=options['boss'])
     labels = [t.text.replace(' ', '') for t in texts if t.score >= .94]
     header = [t.text.replace(' ', '') for t in texts if t.score >= .94
               and t.rectangle[1]+t.rectangle[3]/2 < 170]
@@ -136,7 +165,7 @@ def visible_scope(texts, page, options):
               and any(re.fullmatch(re.escape(options['boss'])+r'(?:(?:等级[.．:：]?|Lv\.?)[1-9]\d*)?', label, re.I)
                       for label in labels)):
             found = dict(kind='boss', difficulty=next(iter(difficulty)), boss=options['boss'])
-    if metadata and found and metadata != found:
+    if metadata and found and any(found.get(key)!=value for key,value in metadata.items()):
         return {'conflict': True}, False
     return (found, True) if found else (metadata, bool(metadata))
 
@@ -186,6 +215,9 @@ def damage_reference(page, scope, maximum, source):
 
 def leading_boss_scope(line):
     """Read a complete leading boss list/range; ambiguous scopes remain common."""
+    prefix=re.match(r'\s*[（(](?:无|有|不用|替代|替补)[^()（）\n]{1,20}[）)]\s*(?=(?:(?:Boss|首领)\s*)?[1-3]\s*王)',line,re.I)
+    offset=prefix.end() if prefix else 0
+    line=line[offset:]
     atom = r'(?:(?:Boss|首领)\s*)?[1-3](?!\d)(?:\s*王)?'
     match = re.match(r'\s*[【\[]?\s*('+atom+r'(?:\s*[/、,，&和及与\-－~～至到]\s*'+atom+r')*)', line, re.I)
     if (not match or not re.search(r'Boss|首领|王', match[1], re.I) or '前哨' in line
@@ -198,7 +230,7 @@ def leading_boss_scope(line):
         if re.search(r'[\-－~～至到]', match[1][first.end():second.start()]):
             low, high = sorted((int(first[0]), int(second[0])))
             bosses.update(range(low, high+1))
-    return bosses, match.end()
+    return bosses, offset+match.end()
 
 
 def relevant_statements(text, options):
@@ -380,6 +412,10 @@ def applicable_scope(scope, options, *, allow_higher=False, allow_lower=False):
     wanted = target_scope(options)
     if scope == wanted:
         return True
+    if scope=={'kind':'outpost'} and wanted['kind']=='outpost':
+        return allow_higher and allow_lower
+    if wanted['kind']=='boss' and scope==dict(kind='boss',boss=wanted['boss']):
+        return allow_higher and allow_lower
     tiers = ('普通', '困难', '高难', '极难') if wanted['kind'] == 'boss' else ('普通', '困难', '高难')
     if (allow_higher and wanted['difficulty'] in tiers[:-1]
             and scope == dict(wanted, difficulty=tiers[-1])):
@@ -407,12 +443,18 @@ def parties_for_target(report, options, *, allow_local_trials):
         owned_trial = (allow_local_trials and wanted['kind'] == 'boss' and bool(actions)
             and all(a.get('text') == '要借用这个角色吗？'
                     and a.get('evidence', {}).get('method') == 'video_ocr' for a in actions))
+        # A manual axis cannot be replayed, but its roster may still pass a free
+        # simulation on fixed settings. Only that account result can permit spending.
+        # Unread SET flags are the same case: they default on and the trial decides.
+        roster_trial = (allow_local_trials and wanted['kind'] == 'boss' and not owned_trial
+                        and (bool(actions) or any(type(f.get('value')) is not bool and not f.get('conflicts')
+                                                  for f in flags)))
         if ((raw.get('scope') != wanted and not difficulty_trial) or not raw.get('scope_verified')
                 or raw.get('region') != 'cn' or raw.get('target_region') != 'cn'
-                or raw.get('global_requirements') or actions and not owned_trial
+                or raw.get('global_requirements') or actions and not owned_trial and not roster_trial
                 or len(names) != 5 or any(not isinstance(n, str) or not n or n.startswith('unit:') for n in names)
                 or len(set(map(normalized, names))) != 5
-                or any(type(f.get('value')) is not bool or not f.get('evidence') or f.get('conflicts') for f in flags)
+                or not roster_trial and any(type(f.get('value')) is not bool or not f.get('evidence') or f.get('conflicts') for f in flags)
                 or any(m.get(k, {}).get('conflicts') for m in members
                        for k in ('level', 'rank', 'stars', 'skill_level', 'unique', 'unique2', 'unique_level', 'unique2_stars'))):
             continue
@@ -420,22 +462,30 @@ def parties_for_target(report, options, *, allow_local_trials):
         live_trial = any(e.get('method') == 'combat_matches_live_target' for e in raw.get('scope_evidence', []))
         if live_trial and not allow_local_trials:
             continue
-        if not missing and not difficulty_trial and not live_trial and not owned_trial:
+        def fixed(fact):
+            value = fact.get('value')
+            return value if type(value) is bool and not fact.get('conflicts') else True
+        if not missing and not difficulty_trial and not live_trial and not owned_trial and not roster_trial:
             candidate = to_event_party(raw)
         elif allow_local_trials:
             candidate = EventParty(raw['id']+'-trial', raw['source'],
                 [MemberRequirement(m['name'], m.get('level', {}).get('value'),
                     m.get('rank', {}).get('value'), m.get('stars', {}).get('value'),
                     m.get('unique', {}).get('value'), m.get('unique2', {}).get('value'),
-                    m['instant']['value'], m.get('skill_level', {}).get('value'),
+                    fixed(m.get('instant', {})), m.get('skill_level', {}).get('value'),
                     unique_level=m.get('unique_level', {}).get('value'),
-                    unique2_stars=m.get('unique2_stars', {}).get('value'))
-                 for m in members], max_attempts=1, build_basis='local_trial',
-                assumptions=missing, auto=raw['auto']['value'])
+                    unique2_stars=m.get('unique2_stars', {}).get('value'),
+                    # Accounts max Rank by standard; the trial result judges a higher one.
+                    exact_rank=False)
+                 for m in members], max_attempts=1,
+                build_basis='roster_trial' if roster_trial else 'local_trial',
+                assumptions=missing, auto=fixed(raw.get('auto', {})))
         else:
             continue
+        if roster_trial:
+            candidate.assumptions.append('来源含手动操作，只取五人阵容；按固定 SET/AUTO 免费模拟，通过才实战')
         if difficulty_trial:
-            candidate.assumptions.append('同一目标'+raw['scope']['difficulty']+'来源用于'+wanted['difficulty']+
+            candidate.assumptions.append('同一目标'+raw['scope'].get('difficulty','未注明前哨难度')+'来源用于'+wanted['difficulty']+
                 '账号试打，保留来源难度'+('，首领先免费模拟再核验实战' if wanted['kind'] == 'boss' else ''))
         if live_trial:
             candidate.assumptions.append('来源战斗与实时目标的首领、等级和生命上限一致；先免费模拟核验')
@@ -443,7 +493,7 @@ def parties_for_target(report, options, *, allow_local_trials):
             candidate.assumptions.append('来源画面使用过借角；仅核验账号自有五人，免费模拟通过后才实战')
         # A different difficulty has different HP and combat conditions. Its
         # source damage cannot permit spending even when the team is intact.
-        candidate.damage_reference = ({} if difficulty_trial else
+        candidate.damage_reference = ({} if difficulty_trial or roster_trial else
                                       dict(raw.get('damage_reference', {})))
         result.append(candidate)
     return result

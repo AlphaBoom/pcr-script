@@ -92,9 +92,8 @@ class Event:
     def __str__(self) -> str:
         start = datetime.fromtimestamp(self.startTimestamp, SERVER_TIMEZONE)
         end = datetime.fromtimestamp(self.endTimestamp, SERVER_TIMEZONE)
-        return (
-            f"{self.name}:{start.month}/{start.day} - {end.month}/{end.day}"
-        )
+        label = self.name + ('（长期配置）' if self.extras.get('schedule_only') else '')
+        return f"{label}:{start:%Y/%m/%d %H:%M:%S} - {end:%Y/%m/%d %H:%M:%S}"
 
 
 @dataclass

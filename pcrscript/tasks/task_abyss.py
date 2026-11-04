@@ -141,7 +141,7 @@ def validate_options(options: dict) -> dict:
                   ('max_battles', 100, 300), ('timeout', 3600, 14400), ('battle_timeout', 220, 600)),
         flags=(('allow_local_trials', False), ('audit_only', False), ('discover_sources', True),
                ('prepare_only', False), ('allow_five_star_upgrade', False),
-               ('allow_divine_amulets', False), ('auto_collect_house_stamina', False)))
+               ('allow_divine_amulets', False), ('auto_collect_house_stamina', True)))
     if value.setdefault('search_effort', 'normal') not in ('normal', 'high'):
         raise ValueError('Abyss.search_effort必须为normal或high')
     elements = value.setdefault('elements', list(AREAS))

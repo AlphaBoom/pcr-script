@@ -4,7 +4,8 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 from .event_formation import EventFormation
-from .event_strategy import EventParty, MemberRequirement, readiness, team_key
+from .event_strategy import CharacterStatus, EventParty, MemberRequirement, readiness, team_key
+from ..game_ui.character_search import search_character_candidates as search_character
 from ..game_ui.screen import normalized
 from ..game_ui.avatars import candidate_card_rectangles, face_crop
 from ..game_ui.screen import EventUIError
@@ -59,6 +60,11 @@ class StrategyFormation(EventFormation):
 
     def quick_current(self,*,full,expected_names):
         """Reuse recent detail audits after verifying the live five-card roster."""
+        roster=getattr(self,'portrait_roster',None)
+        if not full and roster and set(map(normalized,expected_names))==roster:
+            order=self.portrait_order(expected_names)
+            if order and set(order)==roster:
+                return [CharacterStatus(n,identity_verified=True) for n in order]
         s=self.ui.capture(ocr=False)
         if len(self.occupied_slots(s))!=5:return None
         rects=[(x-48,self.slot_top,96,96) for x,_ in self.slots]
@@ -189,6 +195,96 @@ class StrategyFormation(EventFormation):
         return None,dict(unready=['没有可确认且未试过的同属性替代阵容'],
                          available=available,rejected=rejected,proposals=choices)
 
+    def portrait_order(self,expected=()):
+        s=self.ui.capture(ocr=False)
+        if len(self.occupied_slots(s))!=5:return None
+        crops=[face_crop(s.image,(x-48,self.slot_top,96,96)) for x,_ in self.slots]
+        names=[normalized(n) if n is not None else None for n in self.avatars.query(crops)]
+        wanted=set(map(normalized,expected))
+        # A near-tie may only settle a member this selection picked from its
+        # search card; a pre-existing slot could hold a look-alike.
+        picked=wanted&set(getattr(self,'portrait_selected',()))
+        for i,name in enumerate(names):
+            if name is None and picked:
+                found=self.avatars.expected_identity(crops[i],picked)
+                names[i]=normalized(found) if found is not None else None
+        # Slot crops can miss a portrait the search card matched exactly. One
+        # gap is settled by elimination, only for a member picked that way.
+        missing=set(map(normalized,expected))-set(names)
+        if (names.count(None)==1 and len(missing)==1
+                and missing<=getattr(self,'portrait_selected',set())
+                and set(names)-{None}<=set(map(normalized,expected))):
+            names[names.index(None)]=missing.pop()
+        elif (names.count(None)==len(missing)>1 and missing<=getattr(self,'portrait_selected',set())
+                and set(names)-{None}<=wanted):
+            # Several gaps are all picked members, so only their order is open.
+            gaps=[i for i,name in enumerate(names) if name is None]
+            found=self.avatars.assign_expected([crops[i] for i in gaps],sorted(missing))
+            if found:
+                for i,name in zip(gaps,found):names[i]=name
+        if None in names or len(set(names))!=5:
+            self.ui.save('portrait_order_unconfirmed',s)
+            return None
+        return names
+
+    def note_unowned(self,names):
+        """This task never acquires characters, so one failed search holds for the whole run."""
+        self.unowned=set(getattr(self,'unowned',()))|set(map(normalized,names))
+
+    def select_by_portrait(self,names):
+        """Pick exact portrait matches without detail pages; None leaves the full audit in charge."""
+        wanted=[normalized(n) for n in names]
+        if not getattr(self.ui.driver,'supports_unicode_input',True) or len(set(wanted))!=5:return None
+        # Picks from an earlier selection do not vouch for the formation found now.
+        self.portrait_selected=set()
+        current=self.portrait_order(wanted)
+        if current is None or set(current)!=set(wanted):
+            if not self.prepare_search():return None
+            self.portrait_selected=set()
+            for name in wanted:
+                print(f'[编队] 搜索并按头像选入 {name}',flush=True)
+                try:
+                    s=search_character(self.ui,name,defocus=self.defocus,field_area=self.search_field_area,
+                                       reset=self.search_reset,field=self.search_field)
+                except EventUIError as error:
+                    if not str(error).startswith(('后台角色搜索输入失败','搜索词未确认写入')):
+                        raise
+                    self._reset_search_for_scan()
+                    return None
+                rects=self.search_rectangles(s.image)
+                crops=[face_crop(s.image,r) for r in rects]
+                # The typed name already excludes unrelated faces; only costumes compete here.
+                hits=[r for r,c in zip(rects,crops) if self.avatars.expected_identity(c,[name])]
+                rect=hits[0] if len(hits)==1 else None
+                if rect is None:
+                    identities=self.avatars.query(crops)
+                    # One unclear portrait only costs that member's detail page.
+                    for r,i,c in zip(rects,identities,crops):
+                        # Only a separated read of another costume (query() keeps a
+                        # margin over every other name) may skip the detail page;
+                        # a near tie between costumes still needs it.
+                        closest=normalized(i) if i is not None else None
+                        if (not hits and closest is not None and closest!=name
+                                and closest.split('(')[0]==name.split('(')[0]):
+                            continue
+                        if self.search_identity_candidate(s,r,i,name):
+                            actual=self.inspect((r[0]+r[2]//2,r[1]+r[3]//2),rectangle=r,expected_name=name,verify_skills=False)
+                            if actual.identity_verified and normalized(actual.name)==name:
+                                rect=r
+                                break
+                if rect is None:
+                    self.ui.click(self.search_reset)
+                    self.note_unowned([name])
+                    return None
+                x,y,w,h=rect
+                self.select_card((x+w//2,y+h//2))
+                self.portrait_selected.add(name)
+            self.ui.click(self.search_reset)
+            current=self.portrait_order(wanted)
+        if current is None or set(current)!=set(wanted):return None
+        self.portrait_roster=set(current)
+        return current
+
     def select_source_members(self, party, *, known_missing=()):
         """Select source identities before their separately declared build is audited."""
         missing = set(map(normalized, known_missing)) & {normalized(m.name) for m in party.members}
@@ -272,6 +368,13 @@ class StrategyFormation(EventFormation):
                 party.auto = document.get('auto', {}).get('value', True)
                 party.build_basis = 'source' if complete and not trial.get('adaptations') else 'local_trial'
             return party, audit
+        unowned=[n for n in source['names'] if normalized(n) in getattr(self,'unowned',())]
+        if unowned:
+            # Another candidate already searched for them; do not reselect this team to learn it again.
+            if self.allow_substitutions:
+                return self.adapt_source(stage,source,unowned)
+            return None,dict(source=source,selection=dict(unready=[dict(character=n,reasons=['未在搜索结果中确认该版本的角色'])
+                             for n in unowned]),unready=['来源阵容缺员，继续其他原阵容候选'])
         current=self.ui.capture(ocr=False)
         identities=self.avatars.query([face_crop(current.image,(x-48,self.slot_top,96,96)) for x,_ in self.slots])
         checked=None
@@ -297,6 +400,7 @@ class StrategyFormation(EventFormation):
             if not ready:
                 unresolved=[f['character'] for f in details.get('unready',[]) if any('专武' in r for r in f.get('reasons',[]))]
                 missing=[f['character'] for f in details.get('unready',[]) if any('未在搜索结果' in r for r in f.get('reasons',[]))]
+                self.note_unowned(missing)
                 if missing and not self.allow_substitutions:
                     return None,dict(source=source,selection=details,unready=['来源阵容缺员，继续其他原阵容候选'])
                 if unresolved and recover and hasattr(self,'recover_equipment'):
@@ -333,8 +437,16 @@ class StrategyFormation(EventFormation):
 
     def adapt_source(self,stage,source,missing):
         if hasattr(self,'check_deadline'):self.check_deadline()
+        adapted,failure=self.adapted_source(stage,source,missing)
+        if adapted is None:return None,failure
+        source.update(adapted)
+        # New members receive their own bounded equipment recovery.
+        return self.source_trial(stage,source)
+
+    def adapted_source(self,stage,source,missing):
+        """Choose local replacements only: (adapted source, None) or (None, failure)."""
         roles=character_roles();available=self.owned_candidates(stage.element)
-        rejected=set(source.get('unavailable_names',[]))|set(missing)
+        rejected=set(source.get('unavailable_names',[]))|set(missing)|set(getattr(self,'unowned',()))
         adapted=dict(source,names=list(source['names']),required_stars=list(source['required_stars']),
                      original_names=source.get('original_names',source['names']),
                      unavailable_names=sorted(rejected),adaptations=list(source.get('adaptations',[])))
@@ -351,9 +463,7 @@ class StrategyFormation(EventFormation):
             if not options:return None,dict(unready=['缺员且没有同属性同职能替补'],missing=missing,available=available)
             replacement=max(options)[1];i=adapted['names'].index(name);adapted['names'][i]=replacement;adapted['required_stars'][i]=None
             adapted['adaptations'].append(dict(missing=name,replacement=replacement,reason='同属性同攻击类型，按职能/治疗/坦克/输出技能相似度选本地替补'))
-        source.update(adapted)
-        # New members receive their own bounded equipment recovery.
-        return self.source_trial(stage,source)
+        return adapted,None
 
     def current_trial(self, stage):
         screen = self.ui.capture()

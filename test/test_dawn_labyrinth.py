@@ -208,6 +208,14 @@ class LabyrinthTaskTests(TaskReplayMixin, TestCase):
         self.assertEqual(self.clicks(), ['取消', '取消', '冒险', '黎明界迷宫'])
         self.assertEqual(report['spent'], 0)
 
+    def test_entry_closes_exploration_list_without_touching_expeditions(self):
+        self.frames([screen(('探险队伍一览',480,42),('撤退',620,165),('关闭',480,480)),
+                     screen(('冒险',100,30),('黎明界迷宫',800,365)),home(0)])
+        report=self.task.run()
+        self.assertEqual(report['status'],'complete',report)
+        self.assertEqual(self.clicks(),['关闭','黎明界迷宫'])
+        self.assertEqual(report['spent'],0)
+
     def test_recollection_receipt_cannot_be_saved_as_pending_maze_spend(self):
         pending = dict(before=1, after=0, cost=1, submitted=False, submission_tracked=True)
         self.task.report['pending_spend'] = pending.copy()

@@ -128,7 +128,7 @@ class DesktopTests(unittest.TestCase):
 
     def test_workspace_categories_and_internal_source_search(self):
         catalog = {item['name']: item for item in desktop.catalog()}
-        for name in ('clear_story', 'dungeon_first_clear', 'upgrade_all_characters', 'max_character_bonds', 'abyss_push'):
+        for name in ('clear_story', 'dungeon_first_clear', 'max_character_bonds', 'abyss_push'):
             self.assertEqual(catalog[name]['category'], 'special')
         for name in ('get_gift', 'clear_campaign_first_time'):
             self.assertEqual(catalog[name]['category'], 'daily')

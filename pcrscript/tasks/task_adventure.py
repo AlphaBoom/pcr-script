@@ -12,6 +12,9 @@ if TYPE_CHECKING:
 from .base import TimeLimitTask, EventNews
 from .registry import register
 from ._actions import _combat_actions, _enter_adventure_actions
+from .task_home import ToHomePage
+from ..game_ui.guild_house import collect_produced_stamina
+from ..game_ui.screen import EventUI, EventUIError
 
 @register("common_adventure")
 class CommonAdventure(ImageTask):
@@ -59,6 +62,27 @@ class QuickClean(ImageTask, TimeLimitTask):
         return QuickClean, args
 
     _pos = ((100, 80), (220, 80), (340, 80), (450, 80), (570, 80), (690, 80), (810, 80))
+
+    def open_preset(self, pref_pos):
+        self.action_squential(ClickAction(pos=(920, 144)), SleepAction(2), ClickAction(pos=pref_pos),
+                              SleepAction(1), show_progress=False)
+
+    def event_ui(self):
+        return EventUI(self.robot.driver, getattr(self.robot, '_task_output', None) or 'cache/daily/quick_clean')
+
+    def stamina_short(self):
+        return bool(self.event_ui().capture().find('体力不足', (35, 440, 470, 500)))
+
+    def collect_house_stamina(self):
+        ToHomePage(self.robot).run(timeout=60)
+        ui = self.event_ui()
+        try:
+            print(f'[快捷扫荡] 公会之家体力：{collect_produced_stamina(ui, ui.capture())}', flush=True)
+        except EventUIError as error:
+            # 领取失败不影响用现有体力扫荡
+            print(f'[快捷扫荡] 公会之家体力未确认：{error}', flush=True)
+        ToHomePage(self.robot).run(timeout=60)
+
     def run(self, pos=0):
         if pos <= 0 or pos > len(QuickClean._pos):
             print(f"不支持的预设选项:{pos}")
@@ -68,11 +92,14 @@ class QuickClean(ImageTask, TimeLimitTask):
         pref_pos = QuickClean._pos[pos - 1]
         # 进入冒险图
         self.action_squential(*_enter_adventure_actions())
+        self.open_preset(pref_pos)
+        if self.stamina_short():
+            # 关卡一览提示体力不足时，先领公会之家体力再重新进入，每次任务只去一次
+            self.action_squential(ClickAction(pos=(580, 480)), SleepAction(1), show_progress=False)
+            self.collect_house_stamina()
+            self.action_squential(*_enter_adventure_actions(), show_progress=False)
+            self.open_preset(pref_pos)
         actions = [
-            ClickAction(pos=(920, 144)),
-            SleepAction(2),
-            ClickAction(pos=pref_pos),
-            SleepAction(1),
             ClickAction(pos=(815, 480)),
             SleepAction(2),
             IfCondition("symbol_restore_power", meet_actions=[
@@ -95,6 +122,8 @@ class QuickClean(ImageTask, TimeLimitTask):
             ClickAction(pos=(580, 480)), # 取消按钮退出
         ]
         self.action_squential(*actions)
+        # 限定商店弹窗会吃掉上面的取消点击，关卡一览不能留给下一个任务
+        ToHomePage(self.robot).run(timeout=60)
 
 
 @register("adventure_daily", requires_home=True)

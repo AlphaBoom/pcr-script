@@ -286,6 +286,26 @@ class EventFormation:
             results.append(actual)
         return results
 
+    def prepare_search(self) -> bool:
+        """Reveal the search bar and empty the slots; False when it stays hidden."""
+        self.ui.wait(lambda s: s.find("队伍编组", (300, 0, 650, 70)), "队伍编组")
+        self.ui.expect_click("全部", self.all_filter_area, exact=True)
+        for _ in range(10):
+            s = self.ui.capture()
+            search = s.find("用角色名搜索|角色名", self.search_field_area) or s.find("重置", self.search_reset_area, exact=True)
+            if search:
+                break
+            self.ui.swipe(*self.search_reveal)
+        else:
+            return False
+        for _ in range(10):
+            s = self.ui.capture(ocr=False)
+            occupied = self.occupied_slots(s)
+            if not occupied:
+                return True
+            self.ui.click(occupied[-1], delay=.3)
+        raise EventUIError("当前队伍未能清空")
+
     def select(self, party: EventParty) -> tuple[bool, TaskReport]:
         """Use the game's hidden search bar, then one batch avatar query."""
         unspecified = [{"character": member.name, "reasons": ["攻略尚未明确专武开启状态"]}
@@ -298,24 +318,8 @@ class EventFormation:
             # Android's `input text` rejects Chinese on some emulators. The
             # existing full-roster scan verifies costumes without text input.
             return self._select_by_scrolling(party)
-        self.ui.wait(lambda s: s.find("队伍编组", (300, 0, 650, 70)), "队伍编组")
-        self.ui.expect_click("全部", self.all_filter_area, exact=True)
-        for _ in range(10):
-            s = self.ui.capture()
-            search = s.find("用角色名搜索|角色名", self.search_field_area) or s.find("重置", self.search_reset_area, exact=True)
-            if search:
-                break
-            self.ui.swipe(*self.search_reveal)
-        else:
+        if not self.prepare_search():
             return self._select_by_scrolling(party)
-        for _ in range(10):
-            s = self.ui.capture(ocr=False)
-            occupied = self.occupied_slots(s)
-            if not occupied:
-                break
-            self.ui.click(occupied[-1], delay=.3)
-        else:
-            raise EventUIError("当前队伍未能清空")
         failures = []
         for member in party.members:
             print(f"[编队] 搜索并核对 {member.name}", flush=True)
