@@ -393,16 +393,25 @@ class AbyssTests(TestCase):
         self.assertEqual(collect_produced_stamina(ui,abyss),dict(before=92,after=92,empty=True))
         self.assertEqual([call.args[0].text for call in ui.click.call_args_list],['公会之家','全部收取'])
 
-    def test_guild_house_unknown_receipt_stops_without_claim_of_stamina(self):
+    def test_guild_house_receipt_without_stamina_is_empty_not_a_claim(self):
         abyss=screen(('公会之家',654,525))
         house=screen(('体力',434,24),('6/413',504,23),('全部收取',900,444))
         receipt=screen(('全部收取',480,39),('收取了以下道具。',475,75),
                        ('扫荡券×44',384,145),('关闭',478,482))
         ui=Mock();ui.wait.side_effect=[house,receipt,house]
-        with self.assertRaisesRegex(EventUIError,'没有可确认的体力'):
-            collect_produced_stamina(ui,abyss)
+        # Only other furniture products: no stamina gained, receipt closed.
+        self.assertEqual(collect_produced_stamina(ui,abyss),
+                         dict(before=6,after=6,empty=True,other_items=True))
         self.assertEqual([call.args[0].text for call in ui.click.call_args_list],
                          ['公会之家','全部收取','关闭'])
+        # A missed stamina line cannot hide a balance that actually rose.
+        gained=screen(('体力',434,24),('186/413',504,23),('全部收取',900,444))
+        ui=Mock();ui.wait.side_effect=[house,receipt,gained]
+        self.assertEqual(collect_produced_stamina(ui,abyss),dict(before=6,after=186))
+        unread=screen(('全部收取',900,444))
+        ui=Mock();ui.wait.side_effect=[house,receipt,unread]
+        with self.assertRaisesRegex(EventUIError,'领取后体力未确认'):
+            collect_produced_stamina(ui,abyss)
 
     def test_guild_house_recovery_requires_matching_stage_detail(self):
         task=object.__new__(AbyssPush);task.ui=Mock()

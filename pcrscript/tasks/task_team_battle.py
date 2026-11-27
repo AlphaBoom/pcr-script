@@ -45,6 +45,10 @@ class BossChanged(EventUIError):
     """The guild changed the selected boss before its simulated plan was used."""
 
 
+class AttackVoided(BossChanged):
+    """Another member killed the boss first; the game refunds the attack."""
+
+
 class TaskDeadline(EventUIError):
     """The task budget expired between safe actions."""
 
@@ -293,7 +297,7 @@ class TeamBattle(TimeLimitTask):
         visible = next((b for b in map_bosses(screen) if b.lane == boss.lane and b.lap == boss.lap), None)
         if visible is None:
             raise BossChanged('目标首领已变化，停止使用旧模拟战结果')
-        self.ui.click((visible.x, 270))
+        self.ui.click((visible.x, visible.y))
         def refresh_after_popup(s):
             if self.popup(s):
                 raise BossChanged('打开首领期间行会奖励或阶段刷新，重新读取地图')
@@ -776,6 +780,9 @@ class TeamBattle(TimeLimitTask):
                 self.ui.click(confirm)
                 started_at = time.monotonic()
                 continue
+            if not simulate and self.voided_attack(screen):
+                self.map_after_battle()
+                raise AttackVoided('其他成员先击败了首领，本次实战未消耗挑战次数；刷新地图重新选择')
             if not simulate and screen.find('获得挑战报酬', (300, 95, 720, 215)):
                 self.ui.save('team_battle_reward', screen)
                 self.ui.click((480, 390))
@@ -839,6 +846,19 @@ class TeamBattle(TimeLimitTask):
             time.sleep(.4)
         raise EventUIError('团队战战斗结果超时；实战不得自动撤退')
 
+    def voided_attack(self, screen) -> bool:
+        """Observed 2026-11-26: a finished real attack on a boss another member
+        killed first ends in 「战斗结果确认」 instead of a result screen."""
+        title = screen.find('战斗结果确认', (300, 100, 660, 185), exact=True)
+        body = screen.find('其他成员已经击败了这个魔物', (300, 225, 660, 280))
+        refund = screen.find('不会消耗挑战次数', (300, 255, 660, 300))
+        confirm = screen.find('确认', (370, 335, 590, 410), exact=True)
+        if not (title and body and refund and confirm):
+            return False
+        self.ui.save('team_battle_attack_voided', screen)
+        self.ui.click(confirm)
+        return True
+
     @staticmethod
     def settled_result_next(screen):
         """「下一步」 of a settled battle result (real or simulated), never a
@@ -878,9 +898,9 @@ class TeamBattle(TimeLimitTask):
 
     def prepare_boss(self, boss: Boss, simulate: bool):
         current, screen = self.open_boss(boss)
-        if (current.name, current.current_hp, current.maximum_hp) != (boss.name, boss.current_hp, boss.maximum_hp):
+        if (current.current_hp, current.maximum_hp) != (boss.current_hp, boss.maximum_hp):
             self.ui.expect_click('取消', (560, 425, 755, 505), exact=True)
-            raise BossChanged('首领身份或血量已变化，旧模拟战无效')
+            raise BossChanged('首领血量已变化，旧模拟战无效')
         self.require_low_stage(screen)
         return self.mode(screen, simulate)
 
@@ -1009,8 +1029,16 @@ class TeamBattle(TimeLimitTask):
             self.report_progress(f'团队战 · {boss.name} · {mode}实战')
             if wanted is None:
                 self.remember_extension_target(boss)
-            real = self.battle(False, names, use_extension=wanted is not None,
-                               reference_damage=reference, boss_hp=boss.current_hp)
+            try:
+                real = self.battle(False, names, use_extension=wanted is not None,
+                                   reference_damage=reference, boss_hp=boss.current_hp)
+            except AttackVoided:
+                # Trust the refund only when the map counters prove it.
+                if self.counts(self.map()) != (cp_before, extension_before):
+                    raise EventUIError('首领被他人先击败后挑战次数变化，无法对账')
+                self.report.setdefault('voided_attacks', []).append(self.report.pop('in_flight'))
+                self.save_report()
+                raise
             # Preserve the settled result even if the following small map
             # counters cannot yet be read. Never replay that submitted attack.
             self.report['in_flight']['result'] = real
