@@ -572,6 +572,17 @@ class TeamBattle(TimeLimitTask):
                     # recording it as a rejected recommendation. Stage D rows
                     # show only the reference damage, never a clear time.
                     if reference is None or (estimate is None and not self.damage_mode):
+                        # Stage D rows keep their damage beside fully visible
+                        # portraits, so this is an unread number, not clipping.
+                        # It used to vanish without a trace (2026-11-28): keep
+                        # one frame per row so wrongly skipped teams are checkable.
+                        logged = self.__dict__.setdefault('unreadable_rows', set())
+                        if self.damage_mode and signature not in logged:
+                            logged.add(signature)
+                            from ..run_session import emit
+                            emit('team_battle.recommendation', decision='unreadable',
+                                 reason='推荐行参考伤害或讨伐时间未读出', row=signature,
+                                 evidence=str(self.ui.save(f'team_battle_unreadable_{signature}', screen)))
                         continue
                     if (self.damage_mode and wanted is None
                             and (estimate is not None or (boss_max and reference*2 > boss_max))):
