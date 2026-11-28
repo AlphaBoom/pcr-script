@@ -14,8 +14,8 @@ from pcrscript.tasks.base import Event
 from pcrscript.tasks.task_team_battle import BossChanged, ORPHAN_EXTENSION, REBUILD_EXTENSION, TaskDeadline, TeamBattle, validate_options
 
 
-def box(text, x, y):
-    return TextBox(text, 1.0, [[x-18, y-8], [x+18, y-8], [x+18, y+8], [x-18, y+8]])
+def box(text, x, y, score=1.0):
+    return TextBox(text, score, [[x-18, y-8], [x+18, y-8], [x+18, y+8], [x-18, y+8]])
 
 
 def read_region_fixture(screen, roi, **options):
@@ -77,6 +77,27 @@ class TeamBattleTests(unittest.TestCase):
         ui.read_region.return_value = EventScreen(image, [box('328810000', 117, 285)])
         self.assertEqual(recommendation_damage(stage_d, 276, ui), 328_810_000)
         self.assertIsNone(recommendation_time(stage_d, 276, ui))
+        # The full frame missed the label: the enlarged band read finds it and
+        # the number is read under the label, not at a fixed offset.
+        missed = EventScreen(image, [box('使用', 711, 276)])
+        ui.read_region.side_effect = lambda screen, roi, **k: EventScreen(
+            image, [box('参考伤害', 111, 263), box('328810000', 117, 285)])
+        self.assertEqual(recommendation_damage(missed, 276, ui), 328_810_000)
+        ui.read_region.side_effect = None
+        # 2026-11-28: the 3x crop split 242240000 into two boxes; the 4x/3x
+        # line read recovers it.
+        row = EventScreen(image, [box('参考伤害', 111, 263), box('242240000', 114, 285)])
+        ui.read_region.return_value = EventScreen(image, [box('24224', 88, 284, .942), box('240000', 137, 284)])
+        ui.number_crop.return_value = 242_240_000
+        self.assertEqual(recommendation_damage(row, 276, ui), 242_240_000)
+        # The line read failing too, a low-score crop that agrees with the
+        # full frame settles it; one that disagrees (an extra 0) does not.
+        ui.number_crop.return_value = None
+        ui.read_region.return_value = EventScreen(image, [box('242240000', 114, 285, .877)])
+        self.assertEqual(recommendation_damage(row, 276, ui), 242_240_000)
+        ui.read_region.return_value = EventScreen(image, [box('2422400000', 114, 285, .831)])
+        self.assertIsNone(recommendation_damage(row, 276, ui))
+        ui.number_crop.reset_mock(return_value=True)
 
     def test_boss_hp_uses_real_region_pipeline_with_numeric_direction_disabled(self):
         image = np.full((540, 960, 3), 240, np.uint8)
@@ -333,6 +354,7 @@ class TeamBattleTests(unittest.TestCase):
         character = EventScreen(image, [box('角色强化', 105, 30)])
         task = TeamBattle.__new__(TeamBattle)
         task.ui = Mock()
+        task.ui.read_region.side_effect = read_region_fixture
         task.ui.wait.side_effect = [listed, character]
         task.ui.capture.return_value = listed
         task.check_deadline = Mock()
